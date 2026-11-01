@@ -33,12 +33,13 @@ import {
 import { ArticleSourceData, EditorialStatus, SegmentType, Tab } from "@/types";
 import { fr } from "@/lib/i18n";
 import { verifyScriptAgainstSource } from "@/lib/editorialVerifier";
+import { createScriptSnapshot } from "@/lib/scriptFingerprint";
 
 const { Title, Text, Paragraph } = Typography;
 
 interface Props {
   tab: Tab;
-  onUpdateStatus: (newStatus: EditorialStatus, note?: string) => void;
+  onUpdateStatus: (newStatus: EditorialStatus, note?: string, scriptSnapshot?: string[]) => void;
   isSplitView: boolean;
   onToggleSplitView: () => void;
 }
@@ -117,7 +118,9 @@ export const EditorialWorkspace: FC<Props> = ({
   };
 
   const handleConfirmApproval = () => {
-    onUpdateStatus("approved", approvalNote || "Validation éditoriale certifiée par le journaliste");
+    // Capture the current script snapshot when approving
+    const scriptSnapshot = createScriptSnapshot([tab]);
+    onUpdateStatus("approved", approvalNote || "Validation éditoriale certifiée par le journaliste", scriptSnapshot);
     setShowApprovalModal(false);
     setApprovalNote("");
     message.success("Sujet certifié et validé pour production vidéo !");

@@ -1,6 +1,6 @@
 import React, { FC, useState } from "react";
 import { Alert, Button, Form, Input, Modal, Radio, Switch, Typography, message } from "antd";
-import { DownloadOutlined, LoadingOutlined } from "@ant-design/icons";
+import { DownloadOutlined, LoadingOutlined, LockOutlined } from "@ant-design/icons";
 import { useGlobalState } from "@/state/globalState";
 import { fr } from "@/lib/i18n";
 
@@ -47,6 +47,10 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
 
+  // Get editorial status from the first tab
+  const editorialStatus = tabs[0]?.editorialStatus || "under_review";
+  const isApproved = editorialStatus === "approved";
+
   const downloadAsJsonProject = (title: string) => {
     const data = {
       config: config.config,
@@ -87,7 +91,15 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
 
     try {
       if (values.exportType === "Projet AI News Studio") {
+        // JSON export is always allowed (backup/export, not publication)
         downloadAsJsonProject(values.title);
+        return;
+      }
+
+      // All other exports require approval
+      if (!isApproved) {
+        message.error(fr.editorial.approvalRequiredForDownload);
+        setIsProcessing(false);
         return;
       }
 
@@ -128,6 +140,17 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
       width={560}
       title={<Typography.Title level={3} style={{ margin: 0 }}>{fr.download.modalTitle}</Typography.Title>}
     >
+      {!isApproved && (
+        <Alert
+          type="warning"
+          message={fr.editorial.approvalRequiredForDownload}
+          description={fr.editorial.approvalRequiredForDownloadDesc}
+          showIcon
+          icon={<LockOutlined />}
+          className="mb-4"
+        />
+      )}
+
       <Form<FormType>
         form={downloadForm}
         onFinish={handleDownload}
@@ -147,12 +170,25 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
 
         <Form.Item name="exportType" label={fr.download.formatLabel}>
           <Radio.Group className="w-full flex flex-col gap-2">
-            {videoTypes.map((t) => (
-              <Radio key={t.name} value={t.name} className="p-2 rounded border border-gray-100 hover:border-blue-400">
-                <div className="font-semibold text-sm">{t.label}</div>
-                <div className="text-xs text-gray-500">{t.description}</div>
-              </Radio>
-            ))}
+            {videoTypes.map((t) => {
+              const isExportRestricted = t.name !== "Projet AI News Studio" && !isApproved;
+              return (
+                <Radio 
+                  key={t.name} 
+                  value={t.name} 
+                  className="p-2 rounded border border-gray-100 hover:border-blue-400"
+                  disabled={isExportRestricted}
+                >
+                  <div className="font-semibold text-sm">{t.label}</div>
+                  <div className="text-xs text-gray-500">{t.description}</div>
+                  {isExportRestricted && (
+                    <div className="text-xs text-orange-600 mt-1">
+                      <LockOutlined /> {fr.editorial.approvalRequired}
+                    </div>
+                  )}
+                </Radio>
+              );
+            })}
           </Radio.Group>
         </Form.Item>
 

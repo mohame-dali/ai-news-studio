@@ -1,210 +1,62 @@
-# Videofy Minimal
+# Videofy AI News Studio
 
-![Videofy CMS screenshot](./videofy_cms.png)
+![Videofy Studio](./videofy_cms.png)
 
-Videofy Minimal is a local tool for turning news articles into short videos for digital signage screens.
+Videofy AI News Studio is a React application for turning news articles into animated, short-form broadcast news videos for social media (Stories, Reels, TikTok) and digital signage.
 
-It fetches article content, generates a short manuscript, matches visuals, produces narration, and renders a final video through a review flow in the CMS UI.
+It fetches article content from news sources (Web URLs, Reuters, AP, or direct copy), generates voiceover manuscripts, matches media assets (images, video clips, and maps), produces narration timings, and provides real-time player preview with human-in-the-loop editing before exporting.
 
-Here is an example video from one of our brands: [example_video_e24.mp4](./example_video_e24.mp4)
+## Key Features
 
-This repository is designed to run on a laptop with only OpenAI and ElevenLabs credentials. It keeps the core workflow, but leaves out most of the internal integrations and infrastructure used in Schibsted's full Videofy setup.
+- **Start Studio**:
+  - News fetchers: Web URL, Reuters Wire, Associated Press (AP), or Direct Article Text.
+  - Brand style selection: Global News default, Nordic News (VG style), TechWire, etc.
+  - Custom prompt editor auto-synchronized with selected brand guidelines.
+  - Quick-launch preconfigured demo stories (Arctic Climate Station, Mars Water Expedition).
+- **Interactive Studio Editor**:
+  - Real-time video player with Ken-Burns camera movement animations (`zoom-in`, `zoom-out`, `pan-left`, `pan-right`, rotations).
+  - Multi-article tab management with drag-and-drop reordering.
+  - Segment editor with `@dnd-kit` drag-and-drop reordering, duplication, and deletion.
+  - Media asset editor:
+    - **Image**: crop and focal hotspot positioning via `react-image-crop`
+    - **Video**: trim duration start / end timecodes and preview
+    - **Map**: latitude/longitude coordinates with interactive tile preview
+  - Voiceover manuscript line editor with pronunciation bracket hints.
+  - Custom audio voice recorder per segment.
+  - Brand theme & JSON configuration editor with asset library viewer.
+- **Export & Download**:
+  - Vertical video format (1080x1920) for 9:16 mobile feeds.
+  - Horizontal video format (1920x1080) for 16:9 displays.
+  - Narration sound-only audio track (.wav / .mp3).
+  - Videofy Project JSON archive for full workflow preservation.
 
-Found a problem or want to chat about the project? Open an issue or join our [Discord server](https://discord.gg/vFvvdC3B)
+## Development & Lancement Windows
 
-## What It Does
-
-Videofy Minimal takes content from a source such as Reuters, AP, or a test web URL, builds a manuscript, matches media, generates voiceover, and renders a video.
-
-The result is a local MP4 with a human-in-the-loop workflow in the CMS UI, so editors can review, tweak, and rerun before rendering.
-
-## Architecture
-
-At a high level, the CMS orchestrates fetching, generation, preview, and rendering, while project state is stored locally under `projects/<projectId>/`.
-
-```mermaid
-flowchart LR
-  CMS[CMS UI<br/>Next.js]
-
-  CMS --> Fetchers[Fetcher plugins<br/>fetchers/*]
-  CMS --> API[Data API<br/>FastAPI]
-  CMS --> Preview[Preview player<br/>Remotion]
-  CMS --> Render[Local renderer]
-
-  API --> AI[OpenAI / ElevenLabs]
-  API --> Projects[Project files<br/>projects/<projectId>/]
-  Fetchers --> Projects
-
-  Projects --> Preview
-  Projects --> Render
-  Render --> Output[MP4 / audio / project export]
-```
-
-The CMS is the operator surface, the FastAPI service handles generation and processing, and each project is persisted under `projects/<projectId>/`.
-
-## Quickstart
-
-### 1. Install Dependencies (macOS with Homebrew)
-
+### Commandes Standard (Multiplateforme)
 ```bash
-brew install uv node ffmpeg
-```
-
-You also need:
-- Python 3.12
-- npm (comes with Node)
-
-### 2. Configure Environment
-
-```bash
-cp .env.example .env
-```
-
-Add your API credentials in `.env`:
-- `OPENAI_API_KEY`
-- `ELEVENLABS_API_KEY`
-
-### 3. Install Project Dependencies
-
-```bash
-uv sync
+# Installation des dépendances
 npm install
+
+# Diagnostic d'environnement (FFmpeg, Ollama, Piper, Node)
+npm run check:env
+
+# Démarrer le serveur de développement sur http://localhost:3000
+npm run dev
+# ou
+npm run start:studio
+
+# Compilation de production
+npm run build
+
+# Vérification des types TypeScript et linter
+npm run lint
 ```
 
-### 4. Start Everything
+### Lancement Rapide sous Windows (D:\AI-News-Studio)
+- **Via PowerShell :**
+  ```powershell
+  .\scripts\start-studio.ps1
+  ```
+- **Via l'explorateur de fichiers :**
+  Double-cliquez sur `scripts\start-studio.cmd`.
 
-```bash
-make dev
-```
-
-If you want hotspot model support while using `make dev`, run:
-
-```bash
-make dev HOTSPOT=1
-```
-
-Open:
-- CMS: `http://127.0.0.1:3000`
-- API: `http://127.0.0.1:8001`
-
-## Docker Compose
-
-To run the CMS and API in containers instead:
-
-```bash
-docker compose up --build
-```
-
-Docker Compose reads the same local `.env` file for values such as `OPENAI_API_KEY` and `ELEVENLABS_API_KEY`.
-
-Open:
-- CMS: `http://127.0.0.1:3000`
-- API: `http://127.0.0.1:8001`
-
-## Projects and Folder Structure
-
-Every run is stored as a project in `projects/<projectId>/`.
-
-Projects are split into:
-- `input`: imported source files and article data
-- `working`: intermediate and editable generation state
-- `output`: final processed files and rendered videos
-
-Example layout:
-
-```text
-projects/
-  <projectId>/
-    generation.json
-    input/
-      article.json
-      images/
-      videos/
-    working/
-      manuscript.json
-      cms-generation.json
-      config.override.json
-      analysis/
-      audio/
-      uploads/
-    output/
-      processed_manuscript.json
-      render-vertical.mp4
-      render-horizontal.mp4
-```
-
-Key files:
-- `generation.json`: project-level settings (brand, options, timestamps)
-- `input/article.json`: fetched article text and media references
-- `working/*`: data generated during `generate` and `process`, plus UI edits
-- `output/*`: final render-ready artifacts
-
-## Fetchers
-
-Fetchers are a drop-in plugin architecture to add your own ways to get content into the system.
-
-Each fetcher lives under `fetchers/<id>/` and defines:
-- input fields (`fetcher.json`)
-- implementation (`fetcher.py`)
-
-In production, each brand/newsroom should build a proper fetcher integration against its own content APIs to get the highest quality data. 
-
-Included fetchers:
-- `reuters`: requires Reuters API credentials
-- `ap`: requires AP API credentials
-- `web`: generic HTML fetcher for local testing and demos
-
-The web fetcher is useful for quick testing, but should not be treated as a production-grade ingestion path.
-
-## Brands
-
-Brands are configured in `brands/*.json`.
-
-A brand controls the look, voice, and generation behavior, including:
-- prompts
-- OpenAI models (`manuscriptModel`, `mediaModel`)
-- voice + TTS defaults
-- logo
-- intro/wipe/outro assets
-- colors and visual theme
-- export defaults
-
-To add a new brand:
-1. Copy `brands/default.json`
-2. Rename to your brand id (for example `brands/mybrand.json`)
-3. Update logo, wipes, colors, prompts, and voice settings
-4. Restart app (or refresh) and select the new brand in CMS
-
-## Player
-
-Rendering is built with [Remotion](https://www.remotion.dev/).
-
-This project uses Remotion for composition and local rendering. For commercial use, verify that your usage complies with Remotion license terms. You might need a license. 
-
-## Hotspot Model
-
-We have trained our own hotspot model to pick good focus areas on press images (where motion/crops should center). Videofy Minimal can use this model by running the commands below.
-
-The model is fetched from Hugging Face and runs locally in a worker process. If unavailable, the pipeline still runs with a fallback hotspot strategy.
-
-To enable hotspot dependencies:
-
-```bash
-uv sync --group hotspot
-```
-
-If you start with `make dev`, include the hotspot group there too:
-
-```bash
-make dev HOTSPOT=1
-```
-
-## Credits
-
-Videofy Minimal was built with contributions from the following people:
-- Johanna Johansson
-- Johannes Andersen
-- Edvard Høiby
-- Njål Borch
-- Anders Haarr
-- Magnus Jensen

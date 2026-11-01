@@ -10,6 +10,7 @@ import EditConfig from "./EditConfig";
 import AddFetchedArticle from "./AddFetchedArticle";
 import EditorialWorkspace from "./EditorialWorkspace";
 import { getGeneration, saveGeneration, updateEditorialStatus } from "@/lib/storage";
+import { generateScriptFingerprint, createScriptSnapshot } from "@/lib/scriptFingerprint";
 import { fr } from "@/lib/i18n";
 
 interface Props {
@@ -88,6 +89,19 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
     if (generationId && tabs.length > 0) {
       const existing = getGeneration(generationId);
       if (existing) {
+        // Invalidate approval if script was edited after approval
+        if (existing.editorialStatus === "approved" && existing.data) {
+          // Check if any tab's script changed using fingerprint
+          const approvedSnapshot = existing.data[0]?.approvedScriptSnapshot || [];
+          const currentFingerprint = generateScriptFingerprint(tabs);
+          const approvedFingerprint = approvedSnapshot.join("|||");
+
+          if (currentFingerprint !== approvedFingerprint) {
+            updateEditorialStatus(generationId, "under_review", "Validation annulée suite à modification du script");
+            message.warning(fr.editorial.approvalInvalidatedOnEdit);
+          }
+        }
+        
         existing.data = tabs;
         saveGeneration(existing);
       }
@@ -102,9 +116,9 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
     setSelectedTabKey(newTab.manuscript.meta.uniqueId);
   };
 
-  const handleUpdateEditorialStatus = (newStatus: EditorialStatus, note?: string) => {
+  const handleUpdateEditorialStatus = (newStatus: EditorialStatus, note?: string, scriptSnapshot?: string[]) => {
     if (generationId) {
-      updateEditorialStatus(generationId, newStatus, note);
+      updateEditorialStatus(generationId, newStatus, note, scriptSnapshot);
       const existing = getGeneration(generationId);
       if (existing && existing.data) {
         setTabs(existing.data);

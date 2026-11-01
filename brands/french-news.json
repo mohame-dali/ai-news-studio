@@ -1,0 +1,90 @@
+{
+  "brand_name": "French News",
+  "language": "fr-FR",
+  "openai": {
+    "manuscriptModel": "gpt-4o",
+    "mediaModel": "gpt-4o"
+  },
+  "options": {
+    "segmentPauseSeconds": 0.35
+  },
+  "exportDefaults": {
+    "exportType": "Vertical",
+    "logo": true,
+    "audio": true,
+    "voice": true,
+    "music": true
+  },
+  "people": {
+    "default": {
+      "voice": "fr-FR-standard",
+      "model_id": "piper-fr_FR",
+      "language": "fr-FR",
+      "preferred_model": "fr_FR-upmc-medium.onnx",
+      "stability": 0.5,
+      "similarity_boost": 0.8,
+      "style": 0,
+      "use_speaker_boost": true
+    }
+  },
+  "prompts": {
+    "scriptPrompt": "Tu es un journaliste d'agence de presse et présentateur de flashs vidéo d'actualité pour la rédaction d'AI News Studio.\n\nTa mission est de synthétiser l'article de presse fourni en un script clair, rigoureux et percutant en français, adapté à une voix off pour formats vidéo verticaux (TikTok, Reels, Shorts) et horizontaux.\n\nConsignes éditoriales strictes :\n1. Langue : Français naturel, soutenu et accessible.\n2. Structure : Exactement 3 ou 4 phrases courtes, chacune apportant une information factuelle nouvelle.\n3. Phrase 1 (Accroche) : Énonce directement le fait majeur (qui, quoi, quand). Bannis toute formule de bienvenue ou remplissage.\n4. Phrases 2 et 3 (Développement) : Expose les causes, chiffres clés, citations vérifiées et contexte essentiel.\n5. Dernière phrase (Conclusion) : Présente les retombées prévues, démarches judiciaires ou perspectives.\n6. Règle des 12 mots : Chaque phrase doit être concise (12 mots maximum) et formulée pour une prononciation fluide par le présentateur vocal.\n7. Rigueur factuelle : Ne fabrique jamais d'information, de date, de chiffre ou de citation absente de l'article source. Ne transforme pas une hypothèse en certitude.\n8. Caractères et prononciation : N'inclus aucun caractère spécial, émoji ou balise markdown parasite incompatible avec la synthèse vocale.",
+    "placementPrompt": "Tu es réalisateur vidéo et monteur pour une rédaction d'actualités. Tu disposes d'un script numéroté en français et d'une liste de médias (vidéos, photographies d'agence, cartes géographiques) extraits de l'article.\n\nConsignes de réalisation :\n1. Associe à chaque phrase du script le média visuel qui illustre le plus fidèlement l'action, le lieu ou la personnalité évoquée.\n2. Priorise systématiquement les extraits vidéos dynamiques lorsqu'ils sont disponibles.\n3. Positionne un média cartographique dès qu'une localisation géographique clé est mentionnée dans le texte.\n4. Assure la cohérence narrative du sujet sans réutiliser le même média deux fois, sauf si aucun autre visuel pertinent n'est disponible.\n5. Veille à ce que chaque phrase dispose d'un média d'appui.",
+    "describeImagesPrompt": "Tu es un documentaliste iconographe de presse. Pour chaque image de l'article transmise en entrée, rédige une description factuelle, concise et neutre de la scène, des sujets visibles, du contexte et de l'ambiance, sans interprétation subjective."
+  },
+  "player": {
+    "logo": "/brand_assets/vs-logo.svg",
+    "logoStyle": "position: absolute; top: 60px; right: 40px; width: 100px; height: auto;",
+    "defaultCameraMovements": [
+      "zoom-in",
+      "pan-right",
+      "zoom-in",
+      "pan-left",
+      "zoom-in",
+      "zoom-out"
+    ],
+    "colors": {
+      "text": {
+        "background": "#002664",
+        "text": "#FFFFFF"
+      },
+      "progress": {
+        "active": {
+          "background": "#ED1C24",
+          "text": "#FFFFFF"
+        },
+        "inactive": {
+          "background": "#1F2937",
+          "text": "#9CA3AF"
+        }
+      },
+      "map": {
+        "marker": "#ED1C24"
+      },
+      "fotoCredits": {
+        "text": "#E5E7EB",
+        "icon": "#E5E7EB"
+      }
+    },
+    "backgroundMusicVolume": 0.35,
+    "backgroundMusic": "https://actions.google.com/sounds/v1/weather/rain_heavy.ogg",
+    "intro": {
+      "portrait": "/intro_outro_wipes/intro.webm",
+      "landscape": "/intro_outro_wipes/intro-16-9.webm",
+      "duration": 3,
+      "offset": -0.88
+    },
+    "wipe": {
+      "portrait": "/intro_outro_wipes/wipes/wipe-portrait.webm",
+      "landscape": "/intro_outro_wipes/wipes/wipe-landscape.webm",
+      "duration": 1.6,
+      "offset": -0.76
+    },
+    "outro": {
+      "portrait": "/intro_outro_wipes/outro.webm",
+      "landscape": "/intro_outro_wipes/outro-16-9.webm",
+      "duration": 3,
+      "offset": -0.76
+    }
+  }
+}

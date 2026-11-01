@@ -6,10 +6,11 @@ import ErrorCard from "./ErrorCard";
 import LoadingCard from "./LoadingCard";
 import { useGlobalState } from "@/state/globalState";
 import { DesktopOutlined, MobileOutlined, DownloadOutlined, SyncOutlined } from "@ant-design/icons";
-import { Button, Segmented, Tooltip, message } from "antd";
+import { Button, Segmented, Tooltip, message, Alert } from "antd";
 import DownloadModal from "./DownloadModal";
-import { updateGenerationData } from "@/lib/storage";
+import { updateGenerationData, getGeneration } from "@/lib/storage";
 import { fr } from "@/lib/i18n";
+import { generateScriptFingerprint } from "@/lib/scriptFingerprint";
 
 interface Props {
   tabs: Tab[];
@@ -28,6 +29,10 @@ export const PreviewOutput: React.FC<Props> = ({ tabs }) => {
     setProcessedManuscripts,
     generationId,
   } = useGlobalState();
+
+  // Get editorial status from the first tab
+  const editorialStatus = tabs[0]?.editorialStatus || "under_review";
+  const isApproved = editorialStatus === "approved";
 
   const fetchData = useCallback(
     async (isUpdate = false) => {
@@ -60,6 +65,39 @@ export const PreviewOutput: React.FC<Props> = ({ tabs }) => {
       updateGenerationData(generationId, tabs);
       message.success(fr.preview.updatedAndSaved);
     }
+  };
+
+  const handleDownloadClick = () => {
+    if (!isApproved) {
+      message.warning(fr.editorial.approvalRequiredForDownload);
+      return;
+    }
+
+    // Immediate validation: check if script matches approved snapshot
+    // This prevents race condition where edit happens between approval and export
+    if (generationId) {
+      const existing = getGeneration(generationId);
+      if (existing && existing.data && existing.data[0]) {
+        const approvedSnapshot = existing.data[0]?.approvedScriptSnapshot || [];
+        const currentFingerprint = generateScriptFingerprint(tabs);
+        const approvedFingerprint = approvedSnapshot.join("|||");
+
+        if (currentFingerprint !== approvedFingerprint) {
+          message.error(fr.editorial.scriptChangedSinceApproval);
+          // Invalidate approval to reflect reality
+          existing.editorialStatus = "under_review";
+          existing.data[0].editorialStatus = "under_review";
+          localStorage.setItem("videofy_generations", JSON.stringify({
+            ...localStorage.getItem("videofy_generations") ? JSON.parse(localStorage.getItem("videofy_generations") as string) : {},
+            [generationId]: existing,
+          }));
+          return;
+        }
+      }
+    }
+
+    updatePreview();
+    setDownloadOpen(true);
   };
 
   useEffect(() => {
@@ -127,17 +165,24 @@ export const PreviewOutput: React.FC<Props> = ({ tabs }) => {
         </Button>
 
         <Button
-          disabled={loading || updating || !!error || !processedManuscripts.length}
+          disabled={loading || updating || !!error || !processedManuscripts.length || !isApproved}
           type="primary"
           icon={<DownloadOutlined />}
-          onClick={() => {
-            updatePreview();
-            setDownloadOpen(true);
-          }}
+          onClick={handleDownloadClick}
         >
           {fr.editor.download}
         </Button>
       </div>
+
+      {!isApproved && (
+        <Alert
+          type="warning"
+          message={fr.editorial.approvalRequiredForDownload}
+          description={fr.editorial.approvalRequiredForDownloadDesc}
+          showIcon
+          className="mt-3 text-xs"
+        />
+      )}
 
       <DownloadModal open={downloadOpen} setOpen={setDownloadOpen} />
     </div>

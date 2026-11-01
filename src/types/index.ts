@@ -342,6 +342,7 @@ export type Tab = {
   editorialStatus?: EditorialStatus;
   revisions?: EditorialRevision[];
   originalScriptSnapshot?: string[];
+  approvedScriptSnapshot?: string[]; // Snapshot of script when approved, for comparison
 };
 
 export type ProjectOption = {

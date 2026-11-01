@@ -229,6 +229,12 @@ export const fr = {
     revisionNotePlaceholder: "Note éditoriale (ex: correction du nom du laboratoire, ajustement du chiffre)...",
     originalScriptSnapshot: "Version originale générée",
     currentVersion: "Version éditée par le journaliste",
+    approvalRequiredForDownload: "Validation éditoriale requise",
+    approvalRequiredForDownloadDesc: "Le sujet doit être validé par le journaliste avant de pouvoir exporter ou télécharger la vidéo finale. Veuillez approuver le script dans l'espace éditorial.",
+    approvalInvalidatedOnEdit: "Validation annulée suite à modification",
+    approvalInvalidatedOnEditDesc: "Le script a été modifié après validation. Veuillez réviser et approuver à nouveau avant l'exportation.",
+    scriptChangedSinceApproval: "Le script a été modifié depuis la validation",
+    scriptChangedSinceApprovalDesc: "Le script actuel diffère de la version approuvée. Veuillez réviser et approuver à nouveau avant l'exportation.",
   },
 };
 

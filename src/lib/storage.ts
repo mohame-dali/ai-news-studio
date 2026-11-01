@@ -166,13 +166,20 @@ export function updateGenerationData(id: string, data: Tab[]): void {
 export function updateEditorialStatus(
   id: string,
   status: EditorialStatus,
-  note?: string
+  note?: string,
+  scriptSnapshot?: string[]
 ): void {
   const existing = getGeneration(id);
   if (existing) {
     existing.editorialStatus = status;
     if (existing.data && existing.data[0]) {
       existing.data[0].editorialStatus = status;
+      
+      // Store approved script snapshot when status becomes approved
+      if (status === "approved" && scriptSnapshot) {
+        existing.data[0].approvedScriptSnapshot = scriptSnapshot;
+      }
+      
       const revisions = existing.data[0].revisions || [];
       revisions.push({
         timestamp: new Date().toISOString(),

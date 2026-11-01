@@ -1,0 +1,8 @@
+{
+  "name": "Videofy AI News Studio",
+  "description": "Generate and edit short-form news videos with AI manuscripts, animations, voiceovers, and multimedia previews.",
+  "prompt": "Video generation and editing studio from news articles",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
