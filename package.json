@@ -1,14 +1,37 @@
 {
-  "name": "videofy-minimal-workspace",
+  "name": "videofy-news-studio",
   "private": true,
-  "workspaces": [
-    "cms",
-    "player",
-    "types"
-  ],
+  "type": "module",
   "scripts": {
-    "dev:cms": "npm run dev -w @videofy/cms",
-    "build:cms": "npm run build -w @videofy/cms",
-    "check-types:cms": "npm run check-types -w @videofy/cms"
+    "dev": "vite --host 0.0.0.0 --port 3000",
+    "start:studio": "vite --host 0.0.0.0 --port 3000",
+    "build": "tsc && vite build",
+    "lint": "tsc --noEmit",
+    "check:env": "node scripts/check-environment.js",
+    "preview": "vite preview --host 0.0.0.0 --port 3000"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.3.4",
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@heroicons/react": "^2.2.0",
+    "ahooks": "^3.11.0",
+    "antd": "^6.6.8",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-image-crop": "^11.1.2",
+    "zod": "^4.6.7",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
   }
 }
