@@ -154,6 +154,12 @@ export const EditorialWorkspace: FC<Props> = ({
             </Tag>
           </Dropdown>
 
+          {(tab.isSensitive || tab.manuscript?.meta?.isSensitive) && (
+            <Tag color="red" icon={<WarningOutlined />}>
+              Sujet sensible — relecture renforcée
+            </Tag>
+          )}
+
           {currentStatus === "approved" && (
             <Tooltip title="Rouvrir la révision pour autoriser des modifications supplémentaires">
               <Button size="small" type="link" danger onClick={handleRevokeApproval}>
@@ -329,11 +335,16 @@ export const EditorialWorkspace: FC<Props> = ({
       >
         <div className="space-y-4">
           <Alert
-            type="warning"
+            type="info"
             showIcon
-            icon={<ExclamationCircleOutlined />}
-            message="Avertissement déontologique strict"
-            description={fr.editorial.disclaimer}
+            icon={<SafetyCertificateOutlined className="text-blue-600 text-base" />}
+            message={
+              <Flex align="center" gap="small">
+                <Text strong className="text-sm">Contrôle factuel et déontologique (Fact-Checking)</Text>
+                <Tag color="blue" className="text-[10px] font-semibold uppercase">Outil d'aide à la relecture</Tag>
+              </Flex>
+            }
+            description="Certains éléments du script (chiffres, dates, noms) n'ont pas été trouvés textuellement dans l'article source. Veuillez les vérifier manuellement avant de certifier."
             className="text-xs"
           />
 
@@ -408,12 +419,44 @@ export const EditorialWorkspace: FC<Props> = ({
           />
 
           {verificationReport.totalAlerts > 0 && (
-            <Alert
-              type="warning"
-              showIcon
-              message={`${verificationReport.totalAlerts} point(s) d'attention non corroborés`}
-              description="Des chiffres ou termes du script n'ont pas été retrouvés textuellement dans la source. Assurez-vous d'avoir validé ces informations avant d'apposer votre visa."
-            />
+            <div className="rounded-xl border border-amber-300 dark:border-amber-700/60 bg-amber-50/90 dark:bg-amber-950/30 p-3.5 shadow-xs">
+              <Flex gap="middle" align="start">
+                <div className="p-2 rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400">
+                  <SafetyCertificateOutlined className="text-xl" />
+                </div>
+                <div className="flex-1 space-y-1.5">
+                  <Flex align="center" justify="space-between" wrap="wrap" gap="small">
+                    <Flex align="center" gap="small">
+                      <Text strong className="text-amber-900 dark:text-amber-200 text-sm">
+                        {verificationReport.totalAlerts} point(s) d'attention non corroborés
+                      </Text>
+                      <Tag color="gold" className="text-[10px] font-bold uppercase tracking-wider">
+                        Fact-Checker Déontologique
+                      </Tag>
+                    </Flex>
+                    <Button
+                      size="small"
+                      type="link"
+                      className="text-amber-700 dark:text-amber-300 p-0 h-auto text-xs font-semibold hover:underline"
+                      onClick={() => {
+                        setShowApprovalModal(false);
+                        setShowVerificationModal(true);
+                      }}
+                    >
+                      Détails des points &rarr;
+                    </Button>
+                  </Flex>
+                  <Paragraph className="text-xs text-amber-800 dark:text-amber-300 mb-0 leading-relaxed font-medium">
+                    Certains éléments du script (chiffres, dates, noms) n'ont pas été trouvés textuellement dans l'article source. Veuillez les vérifier manuellement avant de certifier.
+                  </Paragraph>
+                  <div className="pt-1 border-t border-amber-200/60 dark:border-amber-800/60">
+                    <Text className="text-[11px] text-amber-700/90 dark:text-amber-400/90 block italic">
+                      ℹ️ Contrôle qualité normal : Ceci est une alerte de relecture journalistique standard, et non une erreur technique. Vous pouvez certifier si vous avez corroboré ces données.
+                    </Text>
+                  </div>
+                </div>
+              </Flex>
+            </div>
           )}
 
           <div>

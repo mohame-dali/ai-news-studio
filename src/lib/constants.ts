@@ -30,6 +30,90 @@ export const cameraMovements: { id: CameraMovement; name: string }[] = [
   { id: "none", name: fr.camera.none },
 ];
 
+export const WORDS_PER_SECOND = 2.5;
+
+export interface DurationPreset {
+  id: "court" | "standard" | "long";
+  label: string;
+  description: string;
+  targetSeconds: number;
+  wordBudget: number;
+  sectionsBudget: {
+    accroche: number;
+    contexte: number;
+    faits_cles: number;
+    impact: number;
+    suite: number;
+  };
+}
+
+export const DURATION_PRESETS: Record<"court" | "standard" | "long", DurationPreset> = {
+  court: {
+    id: "court",
+    label: "Court (15-30 s)",
+    description: "Format dynamique ultra-court (25 s, ~60 mots)",
+    targetSeconds: 25,
+    wordBudget: 62,
+    sectionsBudget: {
+      accroche: 12,
+      contexte: 12,
+      faits_cles: 18,
+      impact: 10,
+      suite: 10,
+    },
+  },
+  standard: {
+    id: "standard",
+    label: "Standard (60 s)",
+    description: "Format équilibré pour réseaux sociaux (60 s, ~150 mots)",
+    targetSeconds: 60,
+    wordBudget: 150,
+    sectionsBudget: {
+      accroche: 22,
+      contexte: 30,
+      faits_cles: 45,
+      impact: 30,
+      suite: 23,
+    },
+  },
+  long: {
+    id: "long",
+    label: "Long (120 s)",
+    description: "Format approfondi de décryptage (120 s, ~300 mots)",
+    targetSeconds: 120,
+    wordBudget: 300,
+    sectionsBudget: {
+      accroche: 40,
+      contexte: 65,
+      faits_cles: 95,
+      impact: 60,
+      suite: 40,
+    },
+  },
+};
+
+export const SENSITIVE_KEYWORDS = [
+  "deces", "décès", "mort", "morte", "morts", "attentat", "attentats",
+  "guerre", "guerres", "massacre", "massacres", "victime", "victimes",
+  "viol", "viols", "suicide", "suicides", "meurtre", "meurtres",
+  "assassinat", "assassinats", "tuerie", "fusillade", "fusillades",
+  "agression", "agressions", "homicide", "homicides", "drame", "otage", "otages",
+  "terrorisme", "terroriste"
+];
+
+export function isSensitiveTopic(text: string): boolean {
+  if (!text) return false;
+  const lower = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return SENSITIVE_KEYWORDS.some((kw) => {
+    const normalizedKeyword = kw.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const regex = new RegExp(`(^|[^a-z0-9])${normalizedKeyword}([^a-z0-9]|$)`, "i");
+    return regex.test(lower);
+  });
+}
+
 export const frenchScriptPrompt = `Tu es un journaliste d'agence de presse et présentateur de flashs vidéo d'actualité pour la rédaction d'AI News Studio.
 
 Ta mission est de synthétiser l'article de presse fourni en un script clair, rigoureux et percutant en français, adapté à une voix off pour formats vidéo verticaux (TikTok, Reels, Shorts) et horizontaux.

@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { PlayerConfig, ProcessedManuscript, SegmentType } from "@/types";
+import { BlurRegion, MediaAssetType, PlayerConfig, ProcessedManuscript, SegmentType } from "@/types";
+import { parsePronunciationText } from "@/lib/manuscriptProcessor";
+import { fetchEdgeTts, TtsSpeechData } from "@/services/ttsService";
 import {
   CaretRightOutlined,
   PauseOutlined,
@@ -19,6 +21,14 @@ interface Props {
   disabledLogo?: boolean;
 }
 
+function getMediaUrl(media?: MediaAssetType): string | undefined {
+  if (!media) return undefined;
+  if ("url" in media && typeof media.url === "string") {
+    return media.url;
+  }
+  return undefined;
+}
+
 export const VideofyPlayer: React.FC<Props> = ({
   manuscripts,
   playerConfig,
@@ -31,26 +41,38 @@ export const VideofyPlayer: React.FC<Props> = ({
   const [currentTime, setCurrentTime] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
 
+  // Segment-level TTS cache: segmentId -> TtsSpeechData
+  const [ttsMap, setTtsMap] = useState<Record<string, TtsSpeechData>>({});
+  const [currentSpeech, setCurrentSpeech] = useState<TtsSpeechData | null>(null);
+
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgMusicRef = useRef<HTMLAudioElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const lastTimestampRef = useRef<number | null>(null);
+  const currentSegmentIdRef = useRef<string | number | null>(null);
 
   // Flatten all segments across manuscripts
   const allSegments = useMemo(() => {
     let offset = 0;
-    const segments: (SegmentType & { globalStart: number; globalEnd: number; manuscriptIndex: number })[] = [];
+    const segments: (SegmentType & { globalStart: number; globalEnd: number; manuscriptIndex: number; uniqueId?: string; uniquId?: string })[] = [];
 
-    manuscripts.forEach((m, mIdx) => {
-      (m.segments || []).forEach((s) => {
+    (manuscripts || []).forEach((m, mIdx) => {
+      if (!m) return;
+      const mId = m.meta?.uniqueId || (m.meta as any)?.uniquId || (m as any).uniqueId || (m as any).uniquId || `m-${mIdx}`;
+      (m.segments || []).forEach((s, sIdx) => {
+        if (!s) return;
         const segDuration = Math.max(1, (s.end ?? 4) - (s.start ?? 0));
         const globalStart = offset;
         const globalEnd = offset + segDuration;
         offset = globalEnd;
+        const segId = s.id ?? (s as any).uniqueId ?? (s as any).uniquId ?? `seg-${mIdx}-${sIdx}`;
 
         segments.push({
           ...s,
+          id: segId,
+          uniqueId: String(segId),
+          uniquId: String(segId),
           globalStart,
           globalEnd,
           manuscriptIndex: mIdx,
@@ -74,6 +96,37 @@ export const VideofyPlayer: React.FC<Props> = ({
     );
     return found || allSegments[allSegments.length - 1];
   }, [allSegments, currentTime]);
+
+  // Preload Edge-TTS speech and word timestamps for all segments
+  useEffect(() => {
+    let isCancelled = false;
+
+    const preloadAllTts = async () => {
+      for (const seg of allSegments) {
+        const rawText = seg.text || (seg.texts && seg.texts[0]?.displayText) || "";
+        const [, spokenText] = parsePronunciationText(rawText);
+        if (spokenText.trim()) {
+          const segKey = String(seg?.id ?? (seg as any)?.uniqueId ?? (seg as any)?.uniquId ?? "seg-0");
+          try {
+            const data = await fetchEdgeTts(spokenText, "fr-FR-DeniseNeural");
+            if (!isCancelled && data.audioBase64) {
+              setTtsMap((prev) => ({
+                ...prev,
+                [segKey]: data,
+              }));
+            }
+          } catch (err) {
+            console.warn(`[VideofyPlayer] Preload TTS failed for segment ${segKey}:`, err);
+          }
+        }
+      }
+    };
+
+    preloadAllTts();
+    return () => {
+      isCancelled = true;
+    };
+  }, [allSegments]);
 
   // Playhead animation loop
   useEffect(() => {
@@ -105,22 +158,83 @@ export const VideofyPlayer: React.FC<Props> = ({
     };
   }, [isPlaying, totalDuration]);
 
-  // Sync background music
+  // Edge-TTS audio playback & synchronization
+  useEffect(() => {
+    if (!ttsAudioRef.current) return;
+
+    if (!isPlaying || isMuted || !voice) {
+      ttsAudioRef.current.pause();
+      return;
+    }
+
+    if (!currentSegment) return;
+
+    const segKey = String(currentSegment.id ?? (currentSegment as any).uniqueId ?? (currentSegment as any).uniquId ?? "seg-0");
+    const speechData = ttsMap[segKey];
+
+    const currentSegId = currentSegment.id ?? (currentSegment as any).uniqueId ?? (currentSegment as any).uniquId ?? "seg-0";
+    if (currentSegmentIdRef.current !== currentSegId) {
+      currentSegmentIdRef.current = currentSegId;
+
+      if (speechData && speechData.audioBase64) {
+        setCurrentSpeech(speechData);
+        ttsAudioRef.current.src = speechData.audioBase64;
+        const relTime = Math.max(0, currentTime - currentSegment.globalStart);
+        ttsAudioRef.current.currentTime = relTime;
+        ttsAudioRef.current.play().catch(() => {});
+      } else {
+        // Fetch on the fly if not preloaded yet
+        const rawText = currentSegment.text || (currentSegment.texts && currentSegment.texts[0]?.displayText) || "";
+        const [, spokenText] = parsePronunciationText(rawText);
+        if (spokenText.trim()) {
+          fetchEdgeTts(spokenText, "fr-FR-DeniseNeural").then((data) => {
+            if (data.audioBase64 && ttsAudioRef.current) {
+              setTtsMap((prev) => ({ ...prev, [segKey]: data }));
+              setCurrentSpeech(data);
+              ttsAudioRef.current.src = data.audioBase64;
+              const relTime = Math.max(0, currentTime - currentSegment.globalStart);
+              ttsAudioRef.current.currentTime = relTime;
+              ttsAudioRef.current.play().catch(() => {});
+            }
+          });
+        }
+      }
+    } else {
+      // Still in same segment, ensure playing
+      if (ttsAudioRef.current.paused && speechData && speechData.audioBase64) {
+        ttsAudioRef.current.play().catch(() => {});
+      }
+    }
+  }, [isPlaying, isMuted, voice, currentSegment, ttsMap]);
+
+  // Sync background music with audio ducking when TTS is talking
   useEffect(() => {
     if (!bgMusicRef.current) return;
     if (isPlaying && backgroundMusic && !isMuted) {
-      bgMusicRef.current.volume = (playerConfig?.backgroundMusicVolume ?? 0.35) * 0.8;
+      // Duck music volume when voiceover is actively enabled
+      const isVoiceActive = voice && currentSpeech?.audioBase64;
+      const baseVol = playerConfig?.backgroundMusicVolume ?? 0.35;
+      bgMusicRef.current.volume = isVoiceActive ? baseVol * 0.25 : baseVol * 0.75;
       bgMusicRef.current.play().catch(() => {});
     } else {
       bgMusicRef.current.pause();
     }
-  }, [isPlaying, backgroundMusic, isMuted, playerConfig?.backgroundMusicVolume]);
+  }, [isPlaying, backgroundMusic, isMuted, voice, currentSpeech, playerConfig?.backgroundMusicVolume]);
 
   const togglePlay = () => {
     if (currentTime >= totalDuration && totalDuration > 0) {
+      currentSegmentIdRef.current = null;
+      if (ttsAudioRef.current) {
+        ttsAudioRef.current.pause();
+        ttsAudioRef.current.currentTime = 0;
+      }
       setCurrentTime(0);
       setIsPlaying(true);
       return;
+    }
+
+    if (isPlaying) {
+      if (ttsAudioRef.current) ttsAudioRef.current.pause();
     }
     setIsPlaying(!isPlaying);
   };
@@ -128,6 +242,16 @@ export const VideofyPlayer: React.FC<Props> = ({
   const seek = (time: number) => {
     const clamped = Math.max(0, Math.min(time, totalDuration));
     setCurrentTime(clamped);
+
+    // Synchronize TTS audio offset
+    if (currentSegment && ttsAudioRef.current) {
+      const relTime = Math.max(0, clamped - currentSegment.globalStart);
+      try {
+        ttsAudioRef.current.currentTime = relTime;
+      } catch {
+        // audio element may still be buffering
+      }
+    }
   };
 
   const formatTime = (secs: number) => {
@@ -171,15 +295,92 @@ export const VideofyPlayer: React.FC<Props> = ({
     }
   }, [currentSegment, segmentProgress]);
 
+  // Synchronized Subtitle rendering with word-level highlight
+  const renderedSubtitle = useMemo(() => {
+    if (!currentSegment) return null;
+    const rawText = currentSegment.text || (currentSegment.texts && currentSegment.texts[0]?.displayText) || "";
+    const [displayText] = parsePronunciationText(rawText);
+    if (!displayText.trim()) return null;
+
+    const segKey = String(currentSegment.id ?? (currentSegment as any).uniqueId ?? (currentSegment as any).uniquId ?? "seg-0");
+    const speechData = ttsMap[segKey] || currentSpeech;
+    const relTime = currentTime - currentSegment.globalStart;
+
+    // If we have precise word boundaries from Edge-TTS
+    if (speechData && speechData.words && speechData.words.length > 0) {
+      return (
+        <span className="flex flex-wrap justify-center gap-x-1.5 gap-y-1">
+          {speechData.words.map((w, idx) => {
+            const isSpoken = relTime >= w.offsetSec;
+            const isCurrent =
+              relTime >= w.offsetSec && relTime < w.offsetSec + w.durationSec + 0.15;
+
+            return (
+              <span
+                key={idx}
+                className={`transition-all duration-100 rounded-sm px-0.5 ${
+                  isCurrent
+                    ? "text-yellow-300 font-extrabold scale-110 drop-shadow-[0_2px_8px_rgba(250,204,21,0.6)]"
+                    : isSpoken
+                    ? "text-white font-bold opacity-100"
+                    : "text-white/70 font-medium"
+                }`}
+              >
+                {w.text}
+              </span>
+            );
+          })}
+        </span>
+      );
+    }
+
+    // Fallback: whole sentence display
+    return <span>{displayText}</span>;
+  }, [currentSegment, currentTime, ttsMap, currentSpeech]);
+
+  const rawText = currentSegment?.text || (currentSegment?.texts && currentSegment.texts[0]?.displayText) || "";
+  const [cleanCaption] = parsePronunciationText(rawText);
+  // Number extraction regex: strictly requires units (%, pour cent, €, euros, dollars, millions, milliards) to prevent false positives on years
+  const numberMatch = cleanCaption.match(
+    /\b(\d+(?:[.,]\d+)?\s*(?:%|pour cent|€|euros?|dollars?|millions?|milliards?))(?!\w)/i
+  );
+  const quoteMatch = cleanCaption.match(/[«"“]([^»"”]+)[»"”]/);
+  const isDramatic = /mort|décès|crise|baisse|guerre|danger|chute|alerte|perte|victime|attentat|sanction/i.test(cleanCaption);
+
   const textColor = playerConfig?.colors?.text?.text || "#ffffff";
   const textBgColor = playerConfig?.colors?.text?.background || "#2C4FE3";
   const progressActiveBg = playerConfig?.colors?.progress?.active?.background || "#2C4FE3";
   const progressInactiveBg = playerConfig?.colors?.progress?.inactive?.background || "rgba(0,0,0,0.5)";
 
   const activeMedia = currentSegment?.mainMedia;
-  const isVideo = activeMedia?.type === "video";
+  const mediaUrl = getMediaUrl(activeMedia);
+  const isVideo =
+    activeMedia?.type === "video" ||
+    (Boolean(mediaUrl) &&
+      (mediaUrl!.includes(".mp4") || mediaUrl!.includes(".webm")));
   const isMap = activeMedia?.type === "map";
-  const isImage = !isVideo && !isMap;
+  const isFallbackDataUrl = Boolean(mediaUrl && mediaUrl.startsWith("data:image/svg+xml"));
+  const isImage = !isVideo && !isMap && Boolean(mediaUrl) && !isFallbackDataUrl;
+
+  // Determine effective graphic fallback mode
+  let effectiveGraphicMode: "none" | "number" | "quote" | "map" = "none";
+  if (currentSegment?.graphicMode && currentSegment.graphicMode !== "auto") {
+    effectiveGraphicMode = currentSegment.graphicMode;
+  } else {
+    // Auto mode: if no real external image or video
+    const hasRealMedia = (isVideo || isImage) && !isFallbackDataUrl;
+    if (!hasRealMedia) {
+      if (isMap) {
+        effectiveGraphicMode = "map";
+      } else if (numberMatch) {
+        effectiveGraphicMode = "number";
+      } else if (quoteMatch) {
+        effectiveGraphicMode = "quote";
+      }
+    }
+  }
+
+  const isFallback = effectiveGraphicMode === "none" && !isImage && !isVideo && !isMap;
 
   // Text placement positioning classes
   const placementClass = useMemo(() => {
@@ -210,38 +411,149 @@ export const VideofyPlayer: React.FC<Props> = ({
         />
       )}
 
+      {/* Pro Edge-TTS Audio Narration Track */}
+      <audio
+        ref={ttsAudioRef}
+        preload="auto"
+        className="hidden"
+        onEnded={() => {
+          // Finished playing segment audio
+        }}
+      />
+
       {/* Media Canvas Area */}
       <div className="relative w-full h-full overflow-hidden flex items-center justify-center">
+        {/* 1. GRAPHIC FALLBACK CARD: BIG NUMBER */}
+        {effectiveGraphicMode === "number" && (
+          <div
+            className={`w-full h-full absolute inset-0 flex flex-col items-center justify-center p-6 text-center select-none ${
+              isDramatic
+                ? "bg-gradient-to-br from-red-950 via-neutral-950 to-black"
+                : "bg-gradient-to-br from-blue-950 via-slate-950 to-black"
+            }`}
+          >
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(59,130,246,0.18),transparent_70%)] pointer-events-none" />
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-black uppercase tracking-wider mb-2 shadow-md border ${
+                isDramatic
+                  ? "bg-red-900/60 border-red-500/40 text-red-200"
+                  : "bg-blue-900/60 border-blue-500/40 text-blue-200"
+              }`}
+            >
+              {isDramatic ? "⚠️ CHIFFRE MARQUANT" : "📊 LE CHIFFRE CLÉ"}
+            </span>
+
+            <span
+              className="font-black text-6xl sm:text-7xl md:text-8xl text-yellow-400 tracking-tight transition-transform duration-300 drop-shadow-[0_4px_12px_rgba(0,0,0,0.9)]"
+              style={{
+                WebkitTextStroke: "2.5px #000000",
+                textShadow: "0 0 20px rgba(250, 204, 21, 0.4)",
+              }}
+            >
+              {numberMatch ? numberMatch[1] : "100%"}
+            </span>
+
+            <p className="mt-3 text-xs sm:text-sm font-semibold text-gray-200 max-w-[85%] line-clamp-2 drop-shadow-md">
+              {cleanCaption}
+            </p>
+          </div>
+        )}
+
+        {/* 2. GRAPHIC FALLBACK CARD: QUOTE */}
+        {effectiveGraphicMode === "quote" && (
+          <div
+            className={`w-full h-full absolute inset-0 flex flex-col items-center justify-center p-6 text-center select-none ${
+              isDramatic
+                ? "bg-gradient-to-br from-red-950/90 via-slate-950 to-black"
+                : "bg-gradient-to-br from-slate-950 via-indigo-950/80 to-black"
+            }`}
+          >
+            <span className="text-sky-400/25 font-serif text-8xl -mb-10 select-none">“</span>
+            <span className="inline-flex items-center gap-1 px-3 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider mb-3 bg-sky-950/70 border border-sky-400/40 text-sky-300">
+              💬 DÉCLARATION
+            </span>
+            <blockquote className="text-base sm:text-lg font-bold italic text-white max-w-[85%] leading-snug drop-shadow-lg">
+              « {quoteMatch ? quoteMatch[1] : cleanCaption} »
+            </blockquote>
+          </div>
+        )}
+
+        {/* 3. SOLID EDITORIAL BACKGROUND FALLBACK */}
+        {isFallback && (
+          <div className="w-full h-full absolute inset-0 bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 flex flex-col items-center justify-center select-none">
+            <span className="text-white/10 font-black text-3xl sm:text-4xl tracking-widest uppercase">
+              ACTU DIRECT
+            </span>
+          </div>
+        )}
+
         {/* IMAGE ASSET */}
-        {isImage && activeMedia?.url && (
+        {effectiveGraphicMode === "none" && isImage && mediaUrl && (
           <div
             className="w-full h-full absolute inset-0 bg-cover bg-center transition-transform ease-linear duration-100"
             style={{
-              backgroundImage: `url(${activeMedia.url})`,
+              backgroundImage: `url(${mediaUrl})`,
               transform: mediaTransform,
-              transformOrigin: activeMedia.hotspot
-                ? `${((activeMedia.hotspot.x_norm ?? 0.5) * 100).toFixed(0)}% ${((activeMedia.hotspot.y_norm ?? 0.5) * 100).toFixed(0)}%`
-                : "center center",
+              transformOrigin:
+                activeMedia && "hotspot" in activeMedia && activeMedia.hotspot
+                  ? `${((activeMedia.hotspot.x_norm ?? 0.5) * 100).toFixed(0)}% ${((activeMedia.hotspot.y_norm ?? 0.5) * 100).toFixed(0)}%`
+                  : "center center",
             }}
-          />
+          >
+            {/* STEP 4: Blur Regions (Visages & Plaques) */}
+            {((activeMedia && "blurRegions" in activeMedia ? activeMedia.blurRegions : undefined) || currentSegment?.blurRegions)?.map((r: BlurRegion, bIdx: number) => (
+              <div
+                key={bIdx}
+                className="absolute pointer-events-none rounded border border-dashed border-red-500/80"
+                style={{
+                  left: `${r.x * 100}%`,
+                  top: `${r.y * 100}%`,
+                  width: `${r.w * 100}%`,
+                  height: `${r.h * 100}%`,
+                  backdropFilter: "blur(14px)",
+                  WebkitBackdropFilter: "blur(14px)",
+                  backgroundColor: "rgba(0, 0, 0, 0.25)",
+                }}
+              />
+            ))}
+          </div>
         )}
 
         {/* VIDEO ASSET */}
-        {isVideo && activeMedia?.url && (
-          <video
-            ref={videoElementRef}
-            src={activeMedia.url}
-            autoPlay
-            loop
-            muted
-            playsInline
-            className="w-full h-full object-cover absolute inset-0"
-            style={{ transform: mediaTransform }}
-          />
+        {effectiveGraphicMode === "none" && isVideo && mediaUrl && (
+          <div className="w-full h-full absolute inset-0">
+            <video
+              ref={videoElementRef}
+              src={mediaUrl}
+              autoPlay
+              loop
+              muted
+              playsInline
+              crossOrigin="anonymous"
+              className="w-full h-full object-cover absolute inset-0"
+              style={{ transform: mediaTransform }}
+            />
+            {/* STEP 4: Blur Regions on Video */}
+            {((activeMedia && "blurRegions" in activeMedia ? activeMedia.blurRegions : undefined) || currentSegment?.blurRegions)?.map((r: BlurRegion, bIdx: number) => (
+              <div
+                key={bIdx}
+                className="absolute pointer-events-none rounded border border-dashed border-red-500/80"
+                style={{
+                  left: `${r.x * 100}%`,
+                  top: `${r.y * 100}%`,
+                  width: `${r.w * 100}%`,
+                  height: `${r.h * 100}%`,
+                  backdropFilter: "blur(14px)",
+                  WebkitBackdropFilter: "blur(14px)",
+                  backgroundColor: "rgba(0, 0, 0, 0.25)",
+                }}
+              />
+            ))}
+          </div>
         )}
 
         {/* MAP ASSET */}
-        {isMap && activeMedia?.location && (
+        {activeMedia?.type === "map" && activeMedia.location && (
           <div className="w-full h-full absolute inset-0">
             <MapComponent
               location={activeMedia.location}
@@ -268,7 +580,7 @@ export const VideofyPlayer: React.FC<Props> = ({
 
             return (
               <div
-                key={idx}
+                key={seg?.id ?? (seg as any)?.uniqueId ?? (seg as any)?.uniquId ?? idx}
                 className="h-full rounded-full overflow-hidden flex-1 backdrop-blur-xs transition-all"
                 style={{ backgroundColor: progressInactiveBg }}
               >
@@ -298,15 +610,14 @@ export const VideofyPlayer: React.FC<Props> = ({
               alt="Brand Logo"
               className="max-h-8 max-w-24 object-contain"
               onError={(e) => {
-                // fallback to svg if broken
                 (e.target as HTMLImageElement).style.display = "none";
               }}
             />
           </div>
         )}
 
-        {/* Captions Overlay */}
-        {currentSegment && (
+        {/* Dynamic Synchronized Captions Overlay */}
+        {currentSegment && renderedSubtitle && (
           <div
             className={`absolute left-4 right-4 z-20 flex flex-col items-center pointer-events-none ${placementClass}`}
           >
@@ -317,22 +628,24 @@ export const VideofyPlayer: React.FC<Props> = ({
                 color: textColor,
               }}
             >
-              {currentSegment.text || (currentSegment.texts && currentSegment.texts[0]?.displayText) || ""}
+              {renderedSubtitle}
             </div>
           </div>
         )}
 
-        {/* Photo / Footage Credits */}
-        {activeMedia?.byline && (
-          <div
-            className="absolute bottom-10 left-4 z-20 flex items-center gap-1.5 text-[11px] font-medium tracking-wide drop-shadow-md pointer-events-none"
-            style={{
-              color: playerConfig?.colors?.fotoCredits?.text || "#d1d5db",
-            }}
-          >
-            <span className="opacity-75">📷 {activeMedia.byline}</span>
-          </div>
-        )}
+        {/* Photo / Footage Legal Attribution Badge (TOP-LEFT safe zone, avoiding TikTok overlay) */}
+        {effectiveGraphicMode === "none" &&
+          (activeMedia?.author || activeMedia?.byline || activeMedia?.source) && (
+            <div className="absolute top-7 left-3 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-black/85 backdrop-blur-xs border border-white/15 text-[10px] font-medium tracking-wide text-gray-200 drop-shadow-md pointer-events-none max-w-[55%] truncate">
+              <span>
+                {activeMedia?.type === "video" ? "🎥 Vidéo : " : "📷 Photo : "}
+                {activeMedia?.author ||
+                  (activeMedia?.byline ? activeMedia.byline.replace(/^📷\s*/, "") : "")}
+                {activeMedia?.license ? ` · ${activeMedia.license}` : ""}
+                {activeMedia?.source ? ` · ${activeMedia.source}` : ""}
+              </span>
+            </div>
+          )}
       </div>
 
       {/* Floating Bottom Control Bar */}
@@ -354,7 +667,7 @@ export const VideofyPlayer: React.FC<Props> = ({
             type="button"
             onClick={() => seek(0)}
             className="hover:text-blue-400 p-1 cursor-pointer transition-colors"
-            title="Restart video"
+            title="Recommencer la vidéo"
           >
             <ReloadOutlined />
           </button>
@@ -381,7 +694,7 @@ export const VideofyPlayer: React.FC<Props> = ({
             type="button"
             onClick={() => setIsMuted(!isMuted)}
             className={`p-1 cursor-pointer ${isMuted ? "text-red-400" : "text-gray-300 hover:text-white"}`}
-            title={isMuted ? "Unmute" : "Mute"}
+            title={isMuted ? "Activer le son" : "Couper le son"}
           >
             <SoundOutlined />
           </button>

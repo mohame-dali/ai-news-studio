@@ -31,7 +31,10 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
 
   const [editTheme, setEditTheme] = useState(false);
   const [selectedTabKey, setSelectedTabKey] = useState<string | undefined>(
-    tabs[0]?.manuscript?.meta?.uniqueId
+    tabs?.[0]?.manuscript?.meta?.uniqueId ||
+      (tabs?.[0]?.manuscript?.meta as any)?.uniquId ||
+      (tabs?.[0] as any)?.uniqueId ||
+      (tabs?.[0] as any)?.uniquId
   );
   const [openArticleModal, setOpenArticleModal] = useState(false);
   const [loadingGeneration, setLoadingGeneration] = useState(true);
@@ -60,7 +63,12 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
       setTabs(record.data);
       setSelectedProject(record.project);
       setGenerationId(record.id);
-      setSelectedTabKey(record.data?.[0]?.manuscript?.meta?.uniqueId);
+      setSelectedTabKey(
+        record.data?.[0]?.manuscript?.meta?.uniqueId ||
+          (record.data?.[0]?.manuscript?.meta as any)?.uniquId ||
+          (record.data?.[0] as any)?.uniqueId ||
+          (record.data?.[0] as any)?.uniquId
+      );
 
       form.setFieldsValue({
         tabs: record.data,
@@ -74,8 +82,13 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
   }, [generationParamId, generationId, setConfig, setTabs, setSelectedProject, setGenerationId, form]);
 
   useEffect(() => {
-    if (!selectedTabKey && tabs.length > 0) {
-      setSelectedTabKey(tabs[0]?.manuscript?.meta?.uniqueId);
+    if (!selectedTabKey && tabs && tabs.length > 0) {
+      setSelectedTabKey(
+        tabs[0]?.manuscript?.meta?.uniqueId ||
+          (tabs[0]?.manuscript?.meta as any)?.uniquId ||
+          (tabs[0] as any)?.uniqueId ||
+          (tabs[0] as any)?.uniquId
+      );
     }
   }, [tabs, selectedTabKey]);
 
@@ -113,7 +126,13 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
     const nextTabs = [...currentTabs, newTab];
     form.setFieldValue("tabs", nextTabs);
     setTabs(nextTabs);
-    setSelectedTabKey(newTab.manuscript.meta.uniqueId);
+    const newTabKey =
+      newTab?.manuscript?.meta?.uniqueId ||
+      (newTab?.manuscript?.meta as any)?.uniquId ||
+      (newTab as any)?.uniqueId ||
+      (newTab as any)?.uniquId ||
+      `tab-${Date.now()}`;
+    setSelectedTabKey(newTabKey);
   };
 
   const handleUpdateEditorialStatus = (newStatus: EditorialStatus, note?: string, scriptSnapshot?: string[]) => {
@@ -233,7 +252,12 @@ export const EditPage: FC<Props> = ({ generationParamId, onNavigateHome }) => {
                     onReorder={(from, to) => move(from, to)}
                     items={tabItems.map((t) => {
                       const tab = form.getFieldValue(["tabs", t.name]) || tabs[t.name];
-                      const uniqueId = tab?.manuscript?.meta?.uniqueId || `tab-${t.name}`;
+                      const uniqueId =
+                        tab?.manuscript?.meta?.uniqueId ||
+                        (tab?.manuscript?.meta as any)?.uniquId ||
+                        (tab as any)?.uniqueId ||
+                        (tab as any)?.uniquId ||
+                        `tab-${t.name}`;
                       const title = tab?.manuscript?.meta?.title || "Article sans titre";
 
                       return {

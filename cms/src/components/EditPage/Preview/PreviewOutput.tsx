@@ -68,7 +68,7 @@ const PreviewOutput = ({ tabs }: { tabs: Tab[] }) => {
               abortController: abortController.current,
               manuscript: tab.manuscript,
               config: config,
-              uniqueId: tab.manuscript.meta.uniqueId!,
+              uniqueId: tab?.manuscript?.meta?.uniqueId || (tab?.manuscript?.meta as any)?.uniquId || `tab-${Date.now()}`,
               projectId: tab.projectId || generationId || tab.articleUrl,
               backendGenerationId: tab.backendGenerationId,
             });

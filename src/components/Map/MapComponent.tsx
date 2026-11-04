@@ -22,7 +22,7 @@ export const MapComponent: React.FC<Props> = ({
   if (!location || typeof location.lat !== "number" || typeof location.lon !== "number") {
     return (
       <div className="flex items-center justify-center p-4 bg-gray-100 dark:bg-gray-800 rounded-lg text-gray-500 text-sm">
-        Please specify valid map coordinates.
+        Veuillez renseigner des coordonnées cartographiques valides.
       </div>
     );
   }
@@ -72,7 +72,7 @@ export const MapComponent: React.FC<Props> = ({
           }}
           className="absolute top-2 right-2 z-10 bg-white/90 hover:bg-white text-gray-800 text-xs font-semibold px-2.5 py-1.5 rounded shadow transition-all cursor-pointer"
         >
-          Edit map
+          Modifier la carte
         </button>
       )}
     </div>

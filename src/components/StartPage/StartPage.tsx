@@ -7,12 +7,15 @@ import {
   Form,
   Input,
   Select,
+  Tag,
   Typography,
   message,
 } from "antd";
 import { LoadingOutlined, PlayCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { defaultBrands, defaultFetchers, buildDefaultConfig } from "@/lib/constants";
 import { generateManuscriptFromInput } from "@/lib/articleGenerator";
+import { rankNewsWithOllama } from "@/services/ollamaClient";
+import { DurationOption, NewsGroupItem, RankedNewsItem } from "@/types";
 import { useGlobalState } from "@/state/globalState";
 import { getProjectList, saveGeneration, GenerationRecord } from "@/lib/storage";
 import { fr } from "@/lib/i18n";
@@ -24,7 +27,10 @@ type FormType = {
   brandId: string;
   prompt: string;
   inputs: Record<string, string>;
+  durationOption: DurationOption;
 };
+
+type SourceStatus = { id: string; name: string; ok: boolean; count: number; error?: string };
 
 interface Props {
   onNavigateToEditor: (generationId: string) => void;
@@ -35,6 +41,12 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(fr.start.generating);
   const [recentProjects, setRecentProjects] = useState<{ id: string; name: string }[]>([]);
+  const [newsItems, setNewsItems] = useState<RankedNewsItem[]>([]);
+  const [sourceStatuses, setSourceStatuses] = useState<SourceStatus[]>([]);
+  const [newsLoading, setNewsLoading] = useState(true);
+  const [newsError, setNewsError] = useState<string | null>(null);
+  const [newsCachedAt, setNewsCachedAt] = useState<string | null>(null);
+  const [rankingNotice, setRankingNotice] = useState<string | null>(null);
 
   const {
     setConfig,
@@ -71,6 +83,7 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
         brandId: defaultBrands[0].id,
         prompt: defaultBrands[0].scriptPrompt,
         inputs: {},
+        durationOption: "standard",
       });
     }
   }, [form]);
@@ -84,6 +97,29 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
       lastSyncedBrandId.current = selectedBrandId;
     }
   }, [selectedBrandId, form]);
+
+  const loadNewsroom = async (refresh = false) => {
+    setNewsLoading(true);
+    setNewsError(null);
+    try {
+      const response = await fetch(`/api/news/trending${refresh ? "?refresh=true" : ""}`);
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.error || "Impossible de charger les sources d'actualité.");
+      const ranking = await rankNewsWithOllama((data.items || []) as NewsGroupItem[], refresh);
+      setNewsItems(ranking.items);
+      setSourceStatuses(data.sources || []);
+      setNewsCachedAt(data.cachedAt || ranking.cachedAt);
+      setRankingNotice(ranking.notice || null);
+    } catch (error) {
+      setNewsError(error instanceof Error ? error.message : "Impossible de charger les sources d'actualité.");
+    } finally {
+      setNewsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadNewsroom();
+  }, []);
 
   const loadManuscript = async (values: FormType) => {
     const { fetcherId, brandId, prompt } = values;
@@ -109,7 +145,8 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
       const result = await generateManuscriptFromInput(
         fetcherId,
         values.inputs || {},
-        baseConfig
+        baseConfig,
+        { durationOption: values.durationOption || "standard", onProgress: setLoadingMessage }
       );
 
       const cleanedManuscript = {
@@ -128,6 +165,9 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
           manuscript: cleanedManuscript,
           editorialStatus: "script_generated" as const,
           originalArticle: result.sourceArticle,
+          durationOption: values.durationOption || "standard",
+          isSensitive: cleanedManuscript.meta.isSensitive,
+          sources: cleanedManuscript.meta.sources,
           originalScriptSnapshot: cleanedManuscript.segments.map((s) => s.text || ""),
           revisions: [
             {
@@ -171,11 +211,26 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
       message.success("Sujet vidéo généré avec succès !");
       onNavigateToEditor(result.projectId);
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "Erreur de génération du sujet vidéo");
+      message.error(err instanceof Error ? err.message : "Erreur de génération du sujet vidéo", 7);
     } finally {
       setLoading(false);
       setLoadingMessage(fr.start.generating);
     }
+  };
+
+  const startFromNewsCard = (item: RankedNewsItem) => {
+    if (!item.link) {
+      message.error("Cette suggestion ne contient pas d'URL d'article exploitable.");
+      return;
+    }
+    form.setFieldsValue({ fetcherId: "web", inputs: { url: item.link } });
+    void loadManuscript({
+      fetcherId: "web",
+      brandId: form.getFieldValue("brandId") || defaultBrands[0].id,
+      prompt: form.getFieldValue("prompt") || defaultBrands[0].scriptPrompt,
+      inputs: { url: item.link },
+      durationOption: form.getFieldValue("durationOption") || "standard",
+    });
   };
 
   return (
@@ -197,6 +252,47 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
           {fr.start.heroSubtitle}
         </Paragraph>
       </div>
+
+      <section className="w-full max-w-[80ch] mb-8" aria-label="Actualités à traiter">
+        <Flex justify="space-between" align="center" className="mb-3" wrap="wrap" gap="small">
+          <div>
+            <Title level={3} className="!mb-0">Actualités à traiter</Title>
+            <Typography.Text type="secondary">Suggestions IA — à valider par le rédacteur</Typography.Text>
+          </div>
+          <Flex gap="small" align="center">
+            {newsCachedAt && <Typography.Text type="secondary" className="text-xs">résultat en cache depuis {Math.max(0, Math.floor((Date.now() - new Date(newsCachedAt).getTime()) / 60000))} min</Typography.Text>}
+            <Button onClick={() => void loadNewsroom(true)} loading={newsLoading}>Actualiser</Button>
+          </Flex>
+        </Flex>
+        {rankingNotice && <Alert className="mb-3" type="info" showIcon message={rankingNotice} />}
+        {newsError && <Alert className="mb-3" type="warning" showIcon message="Salle de rédaction indisponible" description={newsError} />}
+        {newsLoading ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {Array.from({ length: 5 }).map((_, index) => <Card key={index} loading size="small" />)}
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {newsItems.map((item) => (
+              <Card key={item.id} hoverable size="small" onClick={() => startFromNewsCard(item)} className="h-full">
+                <Flex vertical gap="small">
+                  <Flex justify="space-between" gap="small">
+                    <Tag color={item.category === "france" ? "blue" : item.category === "europe" ? "purple" : "gold"}>{item.category}</Tag>
+                    <Typography.Text type="secondary" className="text-xs">{new Date(item.pubDate).toLocaleDateString("fr-FR")}</Typography.Text>
+                  </Flex>
+                  <Typography.Text strong>{item.title}</Typography.Text>
+                  <Typography.Text type="secondary" className="text-xs">{item.source} · {item.sourceCount} source{item.sourceCount > 1 ? "s" : ""}</Typography.Text>
+                  <Typography.Text className="text-xs italic">{item.reason}</Typography.Text>
+                </Flex>
+              </Card>
+            ))}
+          </div>
+        )}
+        {sourceStatuses.length > 0 && (
+          <Flex wrap="wrap" gap="small" className="mt-3">
+            {sourceStatuses.map((source) => <Tag key={source.id} color={source.ok ? "success" : "error"}>{source.name}: {source.ok ? `${source.count} articles` : source.error || "indisponible"}</Tag>)}
+          </Flex>
+        )}
+      </section>
 
       <Card
         className="w-full max-w-[80ch] shadow-xl border-gray-200 dark:border-gray-800"
@@ -250,6 +346,17 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
                 value: brand.id,
                 label: brand.brandName,
               }))}
+            />
+          </Form.Item>
+
+          <Form.Item name="durationOption" label="Durée du script" rules={[{ required: true }]}>
+            <Select
+              size="large"
+              options={[
+                { value: "court", label: "Court (15–30 s)" },
+                { value: "standard", label: "Standard (60 s)" },
+                { value: "long", label: "Long (120 s)" },
+              ]}
             />
           </Form.Item>
 

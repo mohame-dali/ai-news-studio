@@ -80,13 +80,28 @@ export const imageAssetSchema = z.object({
   size: sizeSchema,
 });
 
+export const blurRegionSchema = z.object({
+  x: z.number(), // normalized 0..1 (relative to image/video width)
+  y: z.number(), // normalized 0..1 (relative to image/video height)
+  w: z.number(), // normalized 0..1
+  h: z.number(), // normalized 0..1
+});
+
+export type BlurRegion = z.infer<typeof blurRegionSchema>;
+
 export const imageSchema = z.object({
   type: z.literal("image"),
   byline: z.string().optional(),
+  author: z.string().optional(),
   description: z.string().optional(),
   imageAsset: imageAssetSchema,
   url: z.string(),
   hotspot: hotspotSchema.optional(),
+  license: z.string().optional(),
+  licenseUrl: z.string().optional(),
+  licenseValidated: z.boolean().optional(),
+  source: z.string().optional(),
+  blurRegions: z.array(blurRegionSchema).optional(),
 });
 
 export type ImageType = z.infer<typeof imageSchema>;
@@ -99,7 +114,13 @@ export const videoSchema = z.object({
   startFrom: z.number().optional(),
   endAt: z.number().optional(),
   byline: z.string().optional(),
+  author: z.string().optional(),
   url: z.string(),
+  license: z.string().optional(),
+  licenseUrl: z.string().optional(),
+  licenseValidated: z.boolean().optional(),
+  source: z.string().optional(),
+  blurRegions: z.array(blurRegionSchema).optional(),
 });
 
 export type VideoType = z.infer<typeof videoSchema>;
@@ -108,6 +129,12 @@ export const mapSchema = z.object({
   type: z.literal("map"),
   location: locationSchema,
   byline: z.string().optional(),
+  author: z.string().optional(),
+  license: z.string().optional(),
+  licenseUrl: z.string().optional(),
+  licenseValidated: z.boolean().optional(),
+  source: z.string().optional(),
+  blurRegions: z.array(blurRegionSchema).optional(),
 });
 
 export type MapType = z.infer<typeof mapSchema>;
@@ -127,6 +154,9 @@ export type TextType = z.infer<typeof textSchema>;
 export const mediaAssetSchema = z.union([imageSchema, videoSchema, mapSchema]);
 export type MediaAssetType = z.infer<typeof mediaAssetSchema>;
 
+export const graphicModeEnum = z.enum(["none", "auto", "number", "quote", "map"]);
+export type GraphicMode = z.infer<typeof graphicModeEnum>;
+
 export const segmentSchema = z.object({
   id: z.union([z.number(), z.string()]),
   mood: moodEnum,
@@ -145,6 +175,9 @@ export const segmentSchema = z.object({
     .optional(),
   start: z.number().optional(),
   end: z.number().optional(),
+  licenseValidated: z.boolean().optional(),
+  graphicMode: graphicModeEnum.optional(),
+  blurRegions: z.array(blurRegionSchema).optional(),
 });
 
 export type SegmentType = z.infer<typeof segmentSchema>;
@@ -156,6 +189,10 @@ export const manuscriptSchema = z.object({
     byline: z.string(),
     articleUrl: z.string().optional(),
     uniqueId: z.string().optional(),
+    uniquId: z.string().optional(),
+    durationOption: z.enum(["court", "standard", "long"]).optional(),
+    isSensitive: z.boolean().optional(),
+    sources: z.array(z.object({ name: z.string(), url: z.string().optional() })).optional(),
     prompt: z.array(z.any()).optional(),
     generatedSegments: z.array(segmentSchema).optional(),
     description: z.string().optional(),
@@ -167,6 +204,8 @@ export const manuscriptSchema = z.object({
   }),
   segments: z.array(segmentSchema),
   media: z.array(mediaAssetSchema).optional(),
+  uniqueId: z.string().optional(),
+  uniquId: z.string().optional(),
 });
 
 export type ManuscriptType = z.infer<typeof manuscriptSchema>;
@@ -333,6 +372,27 @@ export interface EditorialRevision {
   snapshotTexts?: string[];
 }
 
+export type DurationOption = "court" | "standard" | "long";
+
+export interface NewsGroupItem {
+  id: string;
+  title: string;
+  link: string;
+  source: string;
+  sourceId: string;
+  pubDate: string;
+  region: "france" | "europe" | "monde";
+  relatedSources: string[];
+  sourceCount: number;
+}
+
+export interface RankedNewsItem extends NewsGroupItem {
+  score: number;
+  category: "france" | "europe" | "monde";
+  reason: string;
+  isAiRanked: boolean;
+}
+
 export type Tab = {
   articleUrl: string;
   manuscript: ManuscriptType;
@@ -343,6 +403,9 @@ export type Tab = {
   revisions?: EditorialRevision[];
   originalScriptSnapshot?: string[];
   approvedScriptSnapshot?: string[]; // Snapshot of script when approved, for comparison
+  durationOption?: DurationOption;
+  isSensitive?: boolean;
+  sources?: Array<{ name: string; url?: string }>;
 };
 
 export type ProjectOption = {

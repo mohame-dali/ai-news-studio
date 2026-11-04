@@ -9,9 +9,16 @@ import {
   Input,
   Row,
   Select,
+  Switch,
+  Tag,
   Tooltip,
 } from "antd";
-import { CopyOutlined, DeleteOutlined, PlusOutlined } from "@ant-design/icons";
+import {
+  CopyOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+  SafetyCertificateOutlined,
+} from "@ant-design/icons";
 import { cameraMovements, moods, textPlacements } from "@/lib/constants";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
@@ -138,6 +145,46 @@ export const Segment: FC<SegmentProps> = ({
                     }))}
                   />
                 </Form.Item>
+              </Col>
+
+              <Col xs={24} sm={12} key="graphicMode">
+                <Form.Item label="Mode Graphique / Visuel" name={[position, "graphicMode"]} className="mb-2">
+                  <Select
+                    defaultValue="auto"
+                    options={[
+                      { value: "auto", label: "Auto (Chiffre / Citation / Média)" },
+                      { value: "none", label: "Média plein écran uniquement" },
+                      { value: "number", label: "Grand Chiffre clé animé (Yellow)" },
+                      { value: "quote", label: "Citation déclarative (Italique)" },
+                      { value: "map", label: "Repère cartographique" },
+                    ]}
+                  />
+                </Form.Item>
+              </Col>
+
+              <Col xs={24} sm={12} key="licenseValidation">
+                <div className="p-2 bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-md">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] font-semibold text-blue-900 dark:text-blue-200 flex items-center gap-1">
+                      <SafetyCertificateOutlined /> Carte de Droits
+                    </span>
+                    <Tag color="blue" className="text-[10px] m-0">
+                      Conformité Légale
+                    </Tag>
+                  </div>
+                  <Form.Item
+                    name={[position, "licenseValidated"]}
+                    valuePropName="checked"
+                    className="mb-0"
+                    initialValue={true}
+                  >
+                    <Switch
+                      checkedChildren="Licence certifiée"
+                      unCheckedChildren="Licence non certifiée"
+                      className="w-full text-xs"
+                    />
+                  </Form.Item>
+                </div>
               </Col>
             </Row>
 

@@ -1,61 +1,111 @@
-import { ArticleSourceData, CameraMovement, Config, ManuscriptType, MediaAssetType, Mood, SegmentType, TextPlacement } from "@/types";
+import {
+  ArticleSourceData,
+  CameraMovement,
+  Config,
+  ManuscriptType,
+  MediaAssetType,
+  Mood,
+  SegmentType,
+  TextPlacement,
+} from "@/types";
+import { extractFactsWithOllama, generateSectionWithOllama } from "@/services/ollamaClient";
+import { DURATION_PRESETS, isSensitiveTopic } from "./constants";
+import { fetchMediaCollectionForSegments, MediaResult } from "@/services/mediaService";
 
-const stockPhotos = [
-  {
-    url: "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?auto=format&fit=crop&w=1200&q=80",
-    byline: "AFP / Photothèque d'actualité",
-    description: "Salle de presse et conférence officielle des représentants d'État",
-  },
-  {
-    url: "https://images.unsplash.com/photo-1504711434969-e33886168f5c?auto=format&fit=crop&w=1200&q=80",
-    byline: "Agence France-Presse / Rédaction",
-    description: "Écrans de contrôle et régie de diffusion d'information en continu",
-  },
-  {
-    url: "https://images.unsplash.com/photo-1526778548025-fa2f459cd5c1?auto=format&fit=crop&w=1200&q=80",
-    byline: "Archives Photographiques de Reportage",
-    description: "Station scientifique de haute altitude sous lumière rasante",
-  },
-  {
-    url: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=1200&q=80",
-    byline: "Observatoire des Sciences & de l'Espace",
-    description: "Vue satellite de la topographie planétaire et quadrillage orbital",
-  },
-];
+/**
+ * Scrapes a real web article using the Vite backend proxy /api/scrape-url
+ */
+async function scrapeRealArticle(targetUrl: string): Promise<{
+  title: string;
+  content: string;
+  image?: string;
+  publisher?: string;
+  author?: string;
+  pubdate?: string;
+  url: string;
+}> {
+  const endpoint = `/api/scrape-url?url=${encodeURIComponent(targetUrl)}`;
+  const response = await fetch(endpoint);
 
-const stockVideos = [
-  {
-    url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
-    title: "Séquence d'investigation sur le terrain",
-    byline: "Unité de Reportage Audiovisuel",
-    duration: 15,
-  },
-  {
-    url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-    title: "Documentaire environnemental",
-    byline: "Observatoire de la Faune & Espaces Naturels",
-    duration: 60,
-  },
-];
+  if (!response.ok) {
+    let errorDetail = `Code HTTP ${response.status} (${response.statusText})`;
+    try {
+      const errJson = await response.json();
+      if (errJson?.error) errorDetail = errJson.error;
+    } catch {
+      // ignore
+    }
+    throw new Error(`Échec de l'extraction de l'article : ${errorDetail}`);
+  }
+
+  const data = await response.json();
+  if (!data.success || !data.content || data.content.trim().length < 200) {
+    throw new Error(
+      data.error ||
+        "Le texte extrait contient moins de 200 caractères. Collez manuellement le texte de l'article pour poursuivre."
+    );
+  }
+
+  return data;
+}
+
+/**
+ * Fetches real RSS items using the Vite backend proxy /api/fetch-rss
+ */
+async function fetchRealRss(rssUrl: string): Promise<{
+  title: string;
+  description: string;
+  link: string;
+  items: Array<{
+    title: string;
+    link: string;
+    pubDate: string;
+    content: string;
+    contentSnippet: string;
+    author?: string;
+    image?: string;
+  }>;
+}> {
+  const endpoint = `/api/fetch-rss?url=${encodeURIComponent(rssUrl)}`;
+  const response = await fetch(endpoint);
+
+  if (!response.ok) {
+    let errorDetail = `Code HTTP ${response.status}`;
+    try {
+      const errJson = await response.json();
+      if (errJson?.error) errorDetail = errJson.error;
+    } catch {
+      // ignore
+    }
+    throw new Error(`Échec du chargement du flux RSS : ${errorDetail}`);
+  }
+
+  const data = await response.json();
+  if (!data.success || !data.items || data.items.length === 0) {
+    throw new Error(data.error || "Le flux RSS est valide mais ne contient aucun article récent.");
+  }
+
+  return data;
+}
 
 export async function generateManuscriptFromInput(
   fetcherId: string,
   inputs: Record<string, string>,
-  config: Config
+  config: Config,
+  options: { durationOption?: "court" | "standard" | "long"; onProgress?: (message: string) => void } = {}
 ): Promise<{ projectId: string; manuscript: ManuscriptType; sourceArticle?: ArticleSourceData }> {
-  // Simulation de latence réseau
-  await new Promise((res) => setTimeout(res, 500));
-
-  let title = "Flash Information : Développements Majeurs";
+  let title = "";
   let byline = "Rédaction AI News Studio";
   let content = "";
   let publisher: string | undefined = undefined;
   let author: string | undefined = undefined;
   let sourceUrl: string | undefined = undefined;
-  const pubdate = new Date().toISOString();
+  let pubdate = new Date().toISOString();
+  let articleImage: string | undefined = undefined;
   const randomSuffix = Math.floor(1000 + Math.random() * 9000);
   let projectId = `proj-${fetcherId}-${randomSuffix}`;
 
+  // STEP 1 — STRICT REAL DATA ACQUISITION (NO MOCK DATA)
   if (fetcherId === "web") {
     const rawUrl = inputs.url?.trim();
     if (!rawUrl) {
@@ -64,22 +114,25 @@ export async function generateManuscriptFromInput(
     try {
       const parsedUrl = new URL(rawUrl);
       if (!parsedUrl.protocol.startsWith("http")) {
-        throw new Error("Protocole web non supporté.");
+        throw new Error("Protocole web non supporté. L'adresse doit débuter par http:// ou https://.");
       }
-      sourceUrl = rawUrl;
-      publisher = parsedUrl.hostname.replace(/^www\./, "");
-      const pathnameParts = parsedUrl.pathname.split("/").filter(Boolean);
-      const slug = pathnameParts[pathnameParts.length - 1] || "article-de-presse";
-      projectId = `web-${slug.replace(/[^a-zA-Z0-9-]/g, "") || randomSuffix}`;
-      title = slug
-        .replace(/[-_]/g, " ")
-        .replace(/\b\w/g, (c) => c.toUpperCase());
-    } catch {
-      throw new Error("Impossible d'extraire l'article : URL web invalide ou inaccessible.");
+    } catch (e: any) {
+      throw new Error(`Format d'URL web invalide : ${e.message || rawUrl}`);
     }
-    content =
-      "Les autorités ont publié un communiqué officiel précisant les orientations stratégiques aujourd'hui. Les analystes soulignent des retombées immédiates sur l'ensemble des secteurs concernés. Une concertation interministérielle est d'ores et déjà programmée pour encadrer ces dispositions.";
-    byline = `Rédaction Web / ${publisher}`;
+
+    const scraped = await scrapeRealArticle(rawUrl);
+    title = scraped.title || "Actualité Web";
+    content = scraped.content;
+    articleImage = scraped.image;
+    publisher = scraped.publisher || new URL(rawUrl).hostname.replace(/^www\./, "");
+    author = scraped.author;
+    pubdate = scraped.pubdate || pubdate;
+    sourceUrl = scraped.url || rawUrl;
+    byline = author ? `${author} / ${publisher}` : `Rédaction Web / ${publisher}`;
+
+    const pathnameParts = new URL(rawUrl).pathname.split("/").filter(Boolean);
+    const slug = pathnameParts[pathnameParts.length - 1] || "article";
+    projectId = `web-${slug.slice(0, 30).replace(/[^a-zA-Z0-9-]/g, "") || randomSuffix}`;
   } else if (fetcherId === "rss") {
     const rssUrl = inputs.rss_url?.trim();
     if (!rssUrl) {
@@ -87,48 +140,143 @@ export async function generateManuscriptFromInput(
     }
     try {
       const parsed = new URL(rssUrl);
-      publisher = parsed.hostname.replace(/^www\./, "");
-      sourceUrl = rssUrl;
-      projectId = `rss-${publisher.replace(/[^a-zA-Z0-9-]/g, "")}-${randomSuffix}`;
+      if (!parsed.protocol.startsWith("http")) {
+        throw new Error("L'adresse du flux RSS doit commencer par http:// ou https://.");
+      }
     } catch {
-      throw new Error("Format du flux RSS invalide. Vérifiez l'adresse web renseignée.");
+      throw new Error("Format d'URL du flux RSS invalide.");
     }
-    title = "Actualité Récente : Synthèse du Flux RSS";
-    byline = `Flux RSS / ${publisher}`;
-    content =
-      "Le dernier bulletin d'information signale une évolution déterminante des négociations en cours. Les équipes régionales confirment la mise en sécurité des secteurs clés et l'application des protocoles validés. Les observateurs attendent de nouvelles précisions dans le courant de l'après-midi.";
+
+    const rssData = await fetchRealRss(rssUrl);
+    const topItem = rssData.items[0];
+
+    title = topItem.title || "Actualité du flux RSS";
+    sourceUrl = topItem.link || rssUrl;
+    pubdate = topItem.pubDate || pubdate;
+    author = topItem.author;
+    publisher = rssData.title || new URL(rssUrl).hostname.replace(/^www\./, "");
+    articleImage = topItem.image;
+
+    // Use RSS item content or snippet
+    let itemContent = topItem.content || topItem.contentSnippet || "";
+
+    // If item content is short and a direct article link is available, scrape the full text
+    if (topItem.link && itemContent.length < 200) {
+      try {
+        const fullArticle = await scrapeRealArticle(topItem.link);
+        if (fullArticle.content && fullArticle.content.length > itemContent.length) {
+          itemContent = fullArticle.content;
+          if (fullArticle.image && !articleImage) articleImage = fullArticle.image;
+          if (fullArticle.author && !author) author = fullArticle.author;
+          if (fullArticle.title) title = fullArticle.title;
+        }
+      } catch {
+        // Fall back to original RSS item text if scrape failed
+      }
+    }
+
+    if (!itemContent || itemContent.trim().length < 40) {
+      throw new Error(
+        `Le flux RSS a renvoyé l'article "${title}", mais son contenu textuel est vide ou insuffisant pour générer un sujet.`
+      );
+    }
+
+    content = itemContent;
+    byline = author ? `${author} / ${publisher}` : `Flux RSS / ${publisher}`;
+    projectId = `rss-${publisher.slice(0, 20).replace(/[^a-zA-Z0-9-]/g, "")}-${randomSuffix}`;
   } else if (fetcherId === "reuters") {
-    const keyword = inputs.story_id?.trim();
-    if (!keyword) {
-      throw new Error("La référence ou le mot-clé de la dépêche Reuters est requis.");
+    const ref = inputs.story_id?.trim();
+    if (!ref) {
+      throw new Error("L'URL, mot-clé ou identifiant de dépêche Reuters est requis.");
     }
-    title = `Dépêche Reuters : ${keyword.toUpperCase()}`;
-    byline = "Fil d'Agence Reuters / France";
-    publisher = "Reuters News Agency";
-    author = "Bureau des Dépêches Internationales";
-    projectId = `reuters-${(inputs.project_id || keyword).replace(/[^a-zA-Z0-9-]/g, "")}`;
-    content =
-      "Les délégués réunis ce matin ont finalisé un accord de coopération bilatérale. Les mesures adoptées garantissent la sécurité des échanges et la supervision réglementaire. Les marchés financiers ont réagi positivement à la publication des conclusions.";
+
+    if (ref.startsWith("http://") || ref.startsWith("https://")) {
+      const scraped = await scrapeRealArticle(ref);
+      title = scraped.title || `Dépêche Reuters : ${ref}`;
+      content = scraped.content;
+      articleImage = scraped.image;
+      publisher = "Reuters News Agency";
+      author = scraped.author || "Bureau Reuters";
+      sourceUrl = ref;
+      pubdate = scraped.pubdate || pubdate;
+      byline = author ? `${author} / Reuters` : "Fil d'Agence Reuters";
+      projectId = `reuters-${(inputs.project_id || randomSuffix).toString().replace(/[^a-zA-Z0-9-]/g, "")}`;
+    } else {
+      // Query Google News RSS for real Reuters articles matching the keyword
+      const searchRssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(ref + " site:reuters.com")}&hl=fr&gl=FR&ceid=FR:fr`;
+      let rssResult;
+      try {
+        rssResult = await fetchRealRss(searchRssUrl);
+      } catch {
+        // Fallback to international Reuters topic query
+        const fallbackRss = `https://news.google.com/rss/search?q=${encodeURIComponent("Reuters " + ref)}&hl=en-US&gl=US&ceid=US:en`;
+        rssResult = await fetchRealRss(fallbackRss);
+      }
+
+      if (!rssResult.items || rssResult.items.length === 0) {
+        throw new Error(`Aucune dépêche réelle Reuters trouvée pour la recherche : "${ref}".`);
+      }
+
+      const topItem = rssResult.items[0];
+      title = topItem.title;
+      sourceUrl = topItem.link;
+      pubdate = topItem.pubDate || pubdate;
+      publisher = "Reuters News Agency";
+      author = topItem.author || "Correspondants Reuters";
+      byline = "Fil d'Agence Reuters";
+      articleImage = topItem.image;
+
+      let extracted = topItem.content || topItem.contentSnippet || "";
+      if (topItem.link) {
+        try {
+          const scraped = await scrapeRealArticle(topItem.link);
+          if (scraped.content && scraped.content.length > extracted.length) {
+            extracted = scraped.content;
+            if (scraped.image) articleImage = scraped.image;
+            if (scraped.title) title = scraped.title;
+          }
+        } catch {
+          // Use RSS snippet if direct scrape blocked
+        }
+      }
+
+      if (!extracted || extracted.length < 40) {
+        throw new Error(
+          `La dépêche Reuters trouvée ("${title}") ne contient aucun texte suffisant pour générer un script d'actualité.`
+        );
+      }
+
+      content = extracted;
+      projectId = `reuters-${ref.replace(/[^a-zA-Z0-9-]/g, "") || randomSuffix}`;
+    }
   } else if (fetcherId === "ap") {
-    const rawUrl = inputs.article_url?.trim();
-    if (!rawUrl) {
-      throw new Error("La référence ou l'adresse de la dépêche AP est requise.");
+    const rawRef = inputs.article_url?.trim();
+    if (!rawRef) {
+      throw new Error("L'URL ou l'identifiant de la dépêche AP est requise.");
     }
-    title = `Associated Press : Éléments Clés du Dossier`;
-    byline = "Correspondants Bureau AP";
+
+    const targetUrl = rawRef.startsWith("http") ? rawRef : `https://apnews.com/article/${rawRef}`;
+    const scraped = await scrapeRealArticle(targetUrl);
+
+    title = scraped.title || "Associated Press : Dépêche d'actualité";
+    content = scraped.content;
+    articleImage = scraped.image;
     publisher = "Associated Press (AP)";
-    sourceUrl = rawUrl.startsWith("http") ? rawUrl : `https://apnews.com/article/${rawUrl}`;
-    projectId = `ap-${(inputs.project_id || "alerte").replace(/[^a-zA-Z0-9-]/g, "")}`;
-    content =
-      "Des mesures d'urgence ont été mises en œuvre par les services municipaux coordonnés. Les inspecteurs techniques confirment la sécurisation intégrale des infrastructures de réseau. Un point de situation complet sera présenté lors de la conférence de presse d'après-midi.";
+    author = scraped.author || "Bureau AP";
+    sourceUrl = targetUrl;
+    pubdate = scraped.pubdate || pubdate;
+    byline = author ? `${author} / AP` : "Correspondants Bureau AP";
+    projectId = `ap-${(inputs.project_id || "alerte").replace(/[^a-zA-Z0-9-]/g, "")}-${randomSuffix}`;
   } else if (fetcherId === "manual") {
     const manualTitle = inputs.title?.trim();
     const manualBody = inputs.body?.trim();
     if (!manualTitle || manualTitle.length < 3) {
       throw new Error("Le titre de l'article est requis et doit être explicite.");
     }
-    if (!manualBody || manualBody.length < 15) {
-      throw new Error("Le corps de l'article est trop court. Veuillez insérer un texte d'actualité complet.");
+    if (!manualBody || manualBody.length < 20) {
+      throw new Error(
+        "Le corps de l'article est trop court (minimum 20 caractères). Veuillez insérer un texte d'actualité complet."
+      );
     }
     title = manualTitle;
     content = manualBody;
@@ -137,6 +285,12 @@ export async function generateManuscriptFromInput(
     projectId = `sujet-${Date.now().toString(36)}`;
   } else {
     throw new Error(`Source d'importation inconnue ou non prise en charge : ${fetcherId}`);
+  }
+
+  if (!content || content.trim().length < 30) {
+    throw new Error(
+      "Impossible de poursuivre : le contenu textuel extrait de la source est vide. Aucune donnée fictive autorisée."
+    );
   }
 
   const sourceArticle: ArticleSourceData = {
@@ -150,20 +304,35 @@ export async function generateManuscriptFromInput(
     fetcherId,
   };
 
-  // Découpage en phrases du contenu
-  const rawSentences = content
-    .split(/(?<=[.?!])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 5);
+  // Step 4 — two-stage editorial generation. The writer only receives the
+  // extracted facts, never the article body.
+  const durationOption = options.durationOption || "standard";
+  const duration = DURATION_PRESETS[durationOption];
+  const isSensitive = isSensitiveTopic(`${title} ${content}`);
+  options.onProgress?.("Extraction des faits");
+  const facts = await extractFactsWithOllama(content);
+  const sectionDefinitions = [
+    ["accroche", "Accroche"],
+    ["contexte", "Contexte"],
+    ["faits_cles", "Faits clés"],
+    ["impact", "Impact"],
+    ["suite", "Suite"],
+  ] as const;
+  const sectionLines: string[] = [];
+  for (const [key, label] of sectionDefinitions) {
+    options.onProgress?.(`Rédaction : ${label.toLowerCase()}`);
+    const lines = await generateSectionWithOllama(key, label, facts, duration.sectionsBudget[key], isSensitive);
+    sectionLines.push(...lines);
+  }
+  const sentences = sectionLines;
 
-  const sentences =
-    rawSentences.length > 0
-      ? rawSentences.slice(0, 4)
-      : [
-          "Les autorités régionales ont déployé des mesures d'urgence ce matin.",
-          "Les équipes d'experts confirment la stabilité des réseaux techniques essentiels.",
-          "Les représentants officiels annoncent un protocole de suivi dans l'après-midi.",
-        ];
+  // STEP 3 — REAL LEGAL MEDIA ACQUISITION (PEXELS API)
+  let pexelsMediaList: (MediaResult | null)[] = [];
+  try {
+    pexelsMediaList = await fetchMediaCollectionForSegments(title, sentences);
+  } catch (mediaErr) {
+    console.warn("[ArticleGenerator] Pexels media collection failed:", mediaErr);
+  }
 
   const moodsList: Mood[] = ["neutral", "dramatic", "hopeful", "upbeat"];
   const cameraMovementsList: CameraMovement[] = [
@@ -183,15 +352,16 @@ export async function generateManuscriptFromInput(
     currentTime = end;
 
     let mainMedia: MediaAssetType;
-    if (index === 0) {
-      const photo = stockPhotos[index % stockPhotos.length];
+
+    // Use real extracted image for the first segment if available
+    if (index === 0 && articleImage) {
       mainMedia = {
         type: "image",
-        url: photo.url,
-        byline: photo.byline,
-        description: photo.description,
+        url: articleImage,
+        byline: publisher ? `Photo : ${publisher}` : "Illustration source de l'article",
+        description: title,
         imageAsset: {
-          id: `img-${index}-${Date.now()}`,
+          id: `img-scraped-${Date.now()}`,
           size: { width: 1200, height: 800 },
         },
         hotspot: {
@@ -205,49 +375,52 @@ export async function generateManuscriptFromInput(
           height_norm: 0.75,
         },
       };
-    } else if (index === 1) {
-      if (index % 2 === 1) {
-        const video = stockVideos[0];
-        mainMedia = {
-          type: "video",
-          url: video.url,
-          byline: video.byline,
-          description: video.title,
-          startFrom: 2,
-          endAt: 7,
-          videoAsset: {
-            id: `video-${index}`,
-            title: video.title,
-            duration: video.duration,
-            streamUrls: {
-              mp4: video.url,
+    } else {
+      // Use Pexels legal media item
+      const pexelsItem = pexelsMediaList[index] || pexelsMediaList[0];
+      if (pexelsItem && pexelsItem.url) {
+        if (pexelsItem.type === "video") {
+          mainMedia = {
+            type: "video",
+            url: pexelsItem.url,
+            byline: pexelsItem.attribution,
+            description: title,
+            startFrom: 0,
+            endAt: duration,
+            videoAsset: {
+              id: `video-pexels-${index}-${Date.now()}`,
+              title: `${title} - B-roll ${index + 1}`,
+              duration: pexelsItem.duration || 15,
+              streamUrls: {
+                mp4: pexelsItem.url,
+              },
             },
-          },
-        };
+          };
+        } else {
+          mainMedia = {
+            type: "image",
+            url: pexelsItem.url,
+            byline: pexelsItem.attribution,
+            description: title,
+            imageAsset: {
+              id: `img-pexels-${index}-${Date.now()}`,
+              size: { width: pexelsItem.width || 1080, height: pexelsItem.height || 1920 },
+            },
+          };
+        }
       } else {
+        // Fallback: No random photos. Clean solid editorial background card.
         mainMedia = {
-          type: "map",
-          byline: "Cartographie IGN / OpenStreetMap",
-          location: {
-            lat: 48.8566,
-            lon: 2.3522,
-            zoomStart: 6,
-            zoomEnd: 8,
+          type: "image",
+          url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1080' height='1920'><rect width='100%' height='100%' fill='%230f172a'/></svg>",
+          byline: "Rédaction AI News Studio",
+          description: title,
+          imageAsset: {
+            id: `img-fallback-${index}`,
+            size: { width: 1080, height: 1920 },
           },
         };
       }
-    } else {
-      const photo = stockPhotos[(index + 1) % stockPhotos.length];
-      mainMedia = {
-        type: "image",
-        url: photo.url,
-        byline: photo.byline,
-        description: photo.description,
-        imageAsset: {
-          id: `img-${index}-${Date.now()}`,
-          size: { width: 1200, height: 800 },
-        },
-      };
     }
 
     return {
@@ -282,6 +455,9 @@ export async function generateManuscriptFromInput(
       byline,
       articleUrl: projectId,
       uniqueId: `tab-${projectId}-${Date.now()}`,
+      durationOption,
+      isSensitive,
+      sources: sourceUrl ? [{ name: publisher || "Source originale", url: sourceUrl }] : [],
       audio: {
         src: "/assets/voice-sample.wav",
       },

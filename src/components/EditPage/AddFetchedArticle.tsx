@@ -52,7 +52,7 @@ export const AddFetchedArticle: FC<Props> = ({ open, setOpen, onChange }) => {
       setOpen(false);
       form.resetFields();
     } catch (err) {
-      message.error(err instanceof Error ? err.message : "Erreur lors de l'importation de l'article");
+      message.error(err instanceof Error ? err.message : "Erreur lors de l'importation de l'article", 7);
     } finally {
       setLoading(false);
     }

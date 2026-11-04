@@ -42,8 +42,9 @@ export const PreviewOutput: React.FC<Props> = ({ tabs }) => {
         if (isUpdate) setUpdating(true);
         else setLoading(true);
 
+        const validTabs = (tabs || []).filter((tab) => Boolean(tab && tab.manuscript));
         const results: ProcessedManuscript[] = await Promise.all(
-          tabs.map((tab) => processManuscriptLocally(tab.manuscript, config))
+          validTabs.map((tab) => processManuscriptLocally(tab.manuscript, config))
         );
 
         setError(null);
@@ -116,14 +117,14 @@ export const PreviewOutput: React.FC<Props> = ({ tabs }) => {
     <div className="sticky top-4 flex flex-col items-center w-full max-w-[480px] mx-auto">
       {error && !updating && !loading ? (
         <ErrorCard errorMessage={error} onRetry={() => fetchData()} />
-      ) : !processedManuscripts.length && (updating || loading) ? (
+      ) : !(processedManuscripts?.length) && (updating || loading) ? (
         <LoadingCard />
       ) : (
         <div className="relative w-full">
           <VideofyPlayer
             height={previewType === "Vertical" ? 1920 : 1080}
             width={previewType === "Vertical" ? 1080 : 1920}
-            manuscripts={processedManuscripts}
+            manuscripts={processedManuscripts || []}
             playerConfig={playerConfig}
             style={{
               maxHeight: previewType === "Vertical" ? "75vh" : "50vh",

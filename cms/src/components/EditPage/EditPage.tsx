@@ -28,7 +28,11 @@ const EditPage: FC = () => {
   const { message, notification } = App.useApp();
   const state = useReactive({
     editTheme: false,
-    selectedTab: tabs[0]?.manuscript.meta.uniqueId,
+    selectedTab:
+      tabs?.[0]?.manuscript?.meta?.uniqueId ||
+      (tabs?.[0]?.manuscript?.meta as any)?.uniquId ||
+      (tabs?.[0] as any)?.uniqueId ||
+      (tabs?.[0] as any)?.uniquId,
     manuscript: tabs,
     loadingGeneration: true,
     loadError: null as string | null,
@@ -81,7 +85,11 @@ const EditPage: FC = () => {
         );
         setGenerationId(generation.id);
         state.brandId = generation.brandId || "default";
-        state.selectedTab = generation.data?.[0]?.manuscript?.meta?.uniqueId;
+        state.selectedTab =
+          generation.data?.[0]?.manuscript?.meta?.uniqueId ||
+          (generation.data?.[0]?.manuscript?.meta as any)?.uniquId ||
+          (generation.data?.[0] as any)?.uniqueId ||
+          (generation.data?.[0] as any)?.uniquId;
       } catch (error) {
         console.error(error);
         state.loadError =
@@ -103,8 +111,12 @@ const EditPage: FC = () => {
   ]);
 
   useEffect(() => {
-    if (!state.selectedTab && tabs.length > 0) {
-      state.selectedTab = tabs[0]?.manuscript.meta.uniqueId;
+    if (!state.selectedTab && tabs && tabs.length > 0) {
+      state.selectedTab =
+        tabs[0]?.manuscript?.meta?.uniqueId ||
+        (tabs[0]?.manuscript?.meta as any)?.uniquId ||
+        (tabs[0] as any)?.uniqueId ||
+        (tabs[0] as any)?.uniquId;
     }
   }, [state, tabs]);
 
@@ -115,7 +127,12 @@ const EditPage: FC = () => {
     const nextTabs = [...currentTabs, tab];
     form.setFieldValue("tabs", nextTabs);
     setTabs(nextTabs);
-    state.selectedTab = tab.manuscript.meta.uniqueId;
+    state.selectedTab =
+      tab?.manuscript?.meta?.uniqueId ||
+      (tab?.manuscript?.meta as any)?.uniquId ||
+      (tab as any)?.uniqueId ||
+      (tab as any)?.uniquId ||
+      `tab-${Date.now()}`;
 
     const idFromParams = Array.isArray(params.generation)
       ? params.generation[0]
@@ -231,13 +248,20 @@ const EditPage: FC = () => {
                       }}
                       items={tabItems.map((t, index) => {
                         const tab = form.getFieldValue(["tabs", t.name]);
+                        const uniqueKey =
+                          tab?.manuscript?.meta?.uniqueId ||
+                          (tab?.manuscript?.meta as any)?.uniquId ||
+                          (tab as any)?.uniqueId ||
+                          (tab as any)?.uniquId ||
+                          `tab-${index}`;
+                        const tabTitle = tab?.manuscript?.meta?.title || "Article";
                         return {
-                          key: tab.manuscript.meta.uniqueId!,
+                          key: uniqueKey,
                           label: (
                             <Flex align="center">
                               <Typography.Paragraph
                                 ellipsis={{
-                                  tooltip: tab.manuscript.meta.title,
+                                  tooltip: tabTitle,
                                 }}
                                 style={{
                                   maxWidth: 250,
