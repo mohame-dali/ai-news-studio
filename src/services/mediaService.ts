@@ -1,7 +1,5 @@
 /**
- * AI News Studio — Pexels Legal Media Acquisition Service
- * Extracts relevant keywords from news articles and queries the server Pexels proxy
- * to retrieve real, high-quality, royalty-free B-roll videos and images with proper attribution.
+ * AI News Studio — Openverse openly licensed image acquisition service.
  */
 
 export interface MediaResult {
@@ -130,45 +128,47 @@ export function extractKeywords(title: string, text: string = ""): string[] {
 }
 
 /**
- * Searches for Pexels B-roll media matching the given query keywords.
+ * Searches Openverse for openly licensed images matching the given query.
  */
-export async function searchPexelsMedia(query: string, perPage = 5): Promise<MediaResult[]> {
+export async function fetchMediaFromOpenverse(query: string): Promise<MediaResult[]> {
   if (!query || !query.trim()) return [];
 
   try {
-    const endpoint = `/api/media/search?query=${encodeURIComponent(query.trim())}&per_page=${perPage}`;
+    const endpoint = `/api/media/openverse?query=${encodeURIComponent(query.trim())}`;
     const res = await fetch(endpoint);
 
     if (!res.ok) {
-      console.warn(`[MediaService] Pexels search failed HTTP ${res.status}`);
+      console.warn(`[MediaService] Recherche Openverse échouée (HTTP ${res.status}).`);
       return [];
     }
 
     const data = await res.json();
-    if (!data.success || !data.items || data.items.length === 0) {
+    if (!data.success || !Array.isArray(data.items) || data.items.length === 0) {
       return [];
     }
 
-    return (data.items as any[]).map((item) => ({
+    return data.items.map((item: any): MediaResult => ({
       id: item.id,
       url: item.url,
-      type: item.type === "video" ? "video" : "image",
-      attribution: item.attribution || `Média : ${item.author || "Pexels"} / Pexels`,
-      author: item.author || "Pexels",
+      type: "image",
+      attribution: item.attribution || `Photo : ${item.author || "Créateur non indiqué"} / ${item.license || "CC BY"} / Openverse`,
+      author: item.author || "Créateur non indiqué",
       thumbnail: item.thumbnail || item.url,
-      duration: item.duration,
       width: item.width,
       height: item.height,
+      license: item.license || "CC BY",
+      licenseUrl: item.licenseUrl || "https://creativecommons.org/licenses/",
+      source: "Openverse",
+      title: item.title,
     }));
   } catch (err) {
-    console.warn("[MediaService] Failed to fetch media from Pexels API:", err);
+    console.warn("[MediaService] Échec de la recherche Openverse :", err);
     return [];
   }
 }
 
 /**
- * Fetches the best matching Pexels media for an article based on its title and text.
- * Falls back to broader topical keywords if the specific search yields no results.
+ * Fetches the best matching Openverse image for an article based on its title and text.
  */
 export async function fetchMediaForArticle(
   title: string,
@@ -178,36 +178,27 @@ export async function fetchMediaForArticle(
   const primaryQuery = keywords.join(" ");
 
   // 1. Try with the extracted multi-keyword query
-  let results = await searchPexelsMedia(primaryQuery, 5);
+  let results = await fetchMediaFromOpenverse(primaryQuery);
 
   // 2. If no results, try with the primary keyword alone
   if (results.length === 0 && keywords.length > 1) {
-    results = await searchPexelsMedia(keywords[0], 5);
+    results = await fetchMediaFromOpenverse(keywords[0]);
   }
 
-  // 3. Fallback to general news/editorial B-roll terms if still nothing
-  if (results.length === 0) {
-    results = await searchPexelsMedia("news journalism", 3);
-  }
-
-  if (results.length === 0) {
-    return null;
-  }
-
-  // Prefer video over image for moving background
-  const bestVideo = results.find((r) => r.type === "video");
-  return bestVideo || results[0];
+  return results[0] || null;
 }
 
 /**
- * Fetches multiple B-roll media items for a multi-segment news script.
+ * Fetches one Openverse image per script segment. Missing results stay null so
+ * the caller can render its existing graphic fallback instead of unrelated media.
  */
 export async function fetchMediaCollectionForSegments(
   title: string,
-  sentences: string[]
+  sentences: string[],
+  articleText = ""
 ): Promise<(MediaResult | null)[]> {
   const results: (MediaResult | null)[] = [];
-  const articleKeywords = extractKeywords(title);
+  const articleKeywords = extractKeywords(title, articleText);
 
   for (let i = 0; i < sentences.length; i++) {
     const sentence = sentences[i];
@@ -217,9 +208,8 @@ export async function fetchMediaCollectionForSegments(
       ? `${sentenceKeywords[0]} ${articleKeywords[0] || ""}`.trim()
       : articleKeywords.join(" ");
 
-    const mediaList = await searchPexelsMedia(query, 3);
-    const chosen = mediaList.find((m) => m.type === "video") || mediaList[0] || null;
-    results.push(chosen);
+    const mediaList = await fetchMediaFromOpenverse(query);
+    results.push(mediaList[0] || null);
   }
 
   return results;

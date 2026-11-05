@@ -8,6 +8,7 @@
 import { BlurRegion, MediaAssetType, PlayerConfig, ProcessedManuscript, SegmentType } from "@/types";
 import { parsePronunciationText } from "@/lib/manuscriptProcessor";
 import { fetchEdgeTts, decodeAudioBase64, TtsWord } from "@/services/ttsService";
+import { motionConfig } from "@/config/motionConfig";
 
 function getMediaUrl(media?: MediaAssetType): string | undefined {
   if (!media) return undefined;
@@ -203,13 +204,21 @@ export async function recordPlayerVideo(
     (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   let audioCtx: AudioContext | null = null;
   let audioDest: MediaStreamAudioDestinationNode | null = null;
+  let backgroundMusicElement: HTMLAudioElement | null = null;
 
-  try {
-    audioCtx = new AudioContextClass();
-    audioDest = audioCtx.createMediaStreamDestination();
-  } catch (err) {
-    console.warn("[VideoExport] AudioContext initialization failed:", err);
+  if (options.audio && (options.voice || options.music)) {
+    try {
+      audioCtx = new AudioContextClass();
+      audioDest = audioCtx.createMediaStreamDestination();
+      await audioCtx.resume();
+    } catch (err) {
+      console.error("[VideoExport] AudioContext initialization failed:", err);
+      if (options.voice) throw new Error("Impossible d'initialiser l'audio pour la voix off.");
+      audioCtx = null;
+      audioDest = null;
+    }
   }
+  let audioStartTime = 0;
 
   // 4. Generate & Decode Edge-TTS audio for each segment
   const segmentSpeechMap = new Map<
@@ -217,7 +226,7 @@ export async function recordPlayerVideo(
     { buffer: AudioBuffer | null; words: TtsWord[]; durationSec: number }
   >();
 
-  if (options.voice && audioCtx && audioDest) {
+  if (options.audio && options.voice && audioCtx && audioDest) {
     onProgress?.({ percent: 12, message: "Génération de la voix off neurale (Edge-TTS)..." });
 
     for (let i = 0; i < allSegments.length; i++) {
@@ -232,35 +241,77 @@ export async function recordPlayerVideo(
           if (ttsData.audioBase64) {
             audioBuffer = await decodeAudioBase64(audioCtx, ttsData.audioBase64);
           }
+          if (!audioBuffer) throw new Error("La réponse TTS ne contient pas d'audio décodable.");
           segmentSpeechMap.set(i, {
             buffer: audioBuffer,
             words: ttsData.words || [],
             durationSec: ttsData.durationSec || 0,
           });
         } catch (ttsErr) {
-          console.warn(`[VideoExport] TTS error for segment ${i}:`, ttsErr);
+          await audioCtx.close().catch(() => {});
+          throw ttsErr instanceof Error ? ttsErr : new Error("Échec de la génération audio (TTS)");
         }
       }
     }
   }
 
+  audioStartTime = audioCtx ? audioCtx.currentTime + 0.1 : 0;
   onProgress?.({ percent: 20, message: "Mixage des pistes audio et synchronisation..." });
 
   // 5. Pipe Audio Tracks to Destination
-  if (audioCtx && audioDest) {
+  if (options.audio && audioCtx && audioDest) {
     // A) Background Music
     if (options.music && playerConfig?.backgroundMusic) {
       try {
         const bgAudio = new Audio(playerConfig.backgroundMusic);
+        backgroundMusicElement = bgAudio;
         bgAudio.crossOrigin = "anonymous";
         bgAudio.loop = true;
         const source = audioCtx.createMediaElementSource(bgAudio);
         const gainNode = audioCtx.createGain();
-        // Duck background music slightly during export for crystal-clear voice
-        gainNode.gain.value = (playerConfig.backgroundMusicVolume ?? 0.35) * 0.4;
+        const baseVolume = playerConfig.backgroundMusicVolume ?? 0.35;
+        const restoreVolume = Math.max(baseVolume * motionConfig.ducking.restoreLevel, 0.0001);
+        gainNode.gain.value = restoreVolume;
         source.connect(gainNode);
         gainNode.connect(audioDest);
         bgAudio.play().catch(() => {});
+
+        if (options.voice) {
+          const intervals = allSegments.flatMap((segment, idx) => {
+            const speech = segmentSpeechMap.get(idx);
+            if (!speech?.buffer) return [];
+            const words = speech.words.length
+              ? speech.words
+              : [{ text: "", offsetSec: 0, durationSec: speech.buffer.duration }];
+            return words
+              .filter((word) => word.durationSec > 0)
+              .map((word) => ({
+                start: audioStartTime + segment.globalStart + word.offsetSec,
+                end: audioStartTime + segment.globalStart + word.offsetSec + word.durationSec,
+              }));
+          }).sort((a, b) => a.start - b.start);
+          const mergedIntervals: typeof intervals = [];
+          for (const interval of intervals) {
+            const previous = mergedIntervals[mergedIntervals.length - 1];
+            if (previous && interval.start <= previous.end + 0.25) previous.end = Math.max(previous.end, interval.end);
+            else mergedIntervals.push({ ...interval });
+          }
+          const gain = gainNode.gain;
+          gain.setValueAtTime(restoreVolume, audioStartTime);
+          for (const interval of mergedIntervals) {
+            const duckVolume = Math.max(baseVolume * motionConfig.ducking.duckLevel, 0.0001);
+            gain.setValueAtTime(restoreVolume, interval.start);
+            gain.exponentialRampToValueAtTime(
+              duckVolume,
+              Math.min(interval.end, interval.start + motionConfig.ducking.rampDownSeconds)
+            );
+            gain.setValueAtTime(duckVolume, interval.end);
+            gain.exponentialRampToValueAtTime(
+              restoreVolume,
+              interval.end + motionConfig.ducking.rampUpSeconds
+            );
+          }
+        }
       } catch (err) {
         console.warn("[VideoExport] Background music audio pipe failed:", err);
       }
@@ -278,7 +329,7 @@ export async function recordPlayerVideo(
           source.connect(voiceGain);
           voiceGain.connect(audioDest);
           // Precise start time aligned with segment
-          source.start(audioCtx.currentTime + seg.globalStart);
+          source.start(audioStartTime + seg.globalStart);
         }
       });
     }
@@ -334,13 +385,50 @@ export async function recordPlayerVideo(
   const progressActiveBg = playerConfig?.colors?.progress?.active?.background || "#ED1C24";
   const progressInactiveBg = playerConfig?.colors?.progress?.inactive?.background || "rgba(0,0,0,0.5)";
 
-  // 9. Render Frames sequentially (30 FPS)
+  // 9. Render frames against the audio scheduling clock (30 FPS).
   const fps = 30;
   const frameDuration = 1 / fps;
   const totalFrames = Math.ceil(totalDuration * fps);
+  let pausedDurationMs = 0;
+  const renderStartTime = performance.now();
+  const pauseWhileHidden = async () => {
+    if (!document.hidden) return;
+    const pauseStart = performance.now();
+    if (recorder.state === "recording") recorder.pause();
+    backgroundMusicElement?.pause();
+    preloadedVideos.forEach((video) => video?.pause());
+    if (audioCtx?.state === "running") await audioCtx.suspend();
+    onProgress?.({
+      percent: 25,
+      message: "Veuillez garder cet onglet ouvert pendant l'export.",
+    });
+    await new Promise<void>((resolve) => {
+      const onVisibilityChange = () => {
+        if (!document.hidden) {
+          document.removeEventListener("visibilitychange", onVisibilityChange);
+          resolve();
+        }
+      };
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    });
+    if (audioCtx?.state === "suspended") await audioCtx.resume();
+    if (backgroundMusicElement) backgroundMusicElement.play().catch(() => {});
+    preloadedVideos.forEach((video) => video?.play().catch(() => {}));
+    if (recorder.state === "paused") recorder.resume();
+    pausedDurationMs += performance.now() - pauseStart;
+  };
 
-  for (let frame = 0; frame < totalFrames; frame++) {
-    const currentTime = frame * frameDuration;
+  let frame = 0;
+  while (true) {
+    await pauseWhileHidden();
+    const frameTarget = renderStartTime + pausedDurationMs + frame * frameDuration * 1000;
+    const frameDelay = frameTarget - performance.now();
+    if (frameDelay > 0) await new Promise((resolve) => setTimeout(resolve, frameDelay));
+    const currentTime = audioCtx
+      ? Math.max(0, audioCtx.currentTime - audioStartTime)
+      : Math.max(0, (performance.now() - renderStartTime - pausedDurationMs) / 1000);
+    if (currentTime >= totalDuration) break;
+    frame = Math.max(frame, Math.floor(currentTime * fps));
 
     // Find current segment
     let segIdx = allSegments.findIndex((s) => currentTime >= s.globalStart && currentTime < s.globalEnd);
@@ -877,8 +965,8 @@ export async function recordPlayerVideo(
 
     // DRAW PHOTO / FOOTAGE LEGAL CREDITS & WATERMARK (High-contrast badge in TOP-LEFT safe zone, safe from TikTok UI)
     const mediaAuthor = media?.author || (media?.byline ? media.byline.replace(/^📷\s*/, "") : "");
-    const mediaLicense = media?.license || (media?.source === "Pexels" ? "Licence Pexels" : "");
-    const mediaSource = media?.source || (mediaUrl?.includes("pexels") ? "Pexels" : mediaUrl?.includes("wikimedia") ? "Wikimedia Commons" : "");
+    const mediaLicense = media?.license || "";
+    const mediaSource = media?.source || (mediaUrl?.includes("openverse") ? "Openverse" : mediaUrl?.includes("wikimedia") ? "Wikimedia Commons" : "");
 
     let legalBadge = "";
     if (mediaAuthor && mediaLicense && mediaSource) {
@@ -933,14 +1021,14 @@ export async function recordPlayerVideo(
     }
 
     // Update progress callback every few frames
-    if (frame % 6 === 0 || frame === totalFrames - 1) {
-      const percent = Math.min(95, 25 + Math.round((frame / totalFrames) * 70));
+    if (frame % 6 === 0 || currentTime + frameDuration >= totalDuration) {
+      const percent = Math.min(95, 25 + Math.round((currentTime / totalDuration) * 70));
       onProgress?.({
         percent,
         message: `Rendu HD avec synchronisation vocale (${currentTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s)...`,
       });
-      await new Promise((res) => setTimeout(res, 4));
     }
+    frame = Math.max(frame + 1, Math.floor(currentTime * fps) + 1);
   }
 
   onProgress?.({ percent: 96, message: "Finalisation du fichier vidéo et audio..." });

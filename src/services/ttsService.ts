@@ -39,7 +39,8 @@ export function cleanSpokenText(text: string): string {
  */
 export async function fetchEdgeTts(
   text: string,
-  voice = "fr-FR-DeniseNeural"
+  voice = "fr-FR-DeniseNeural",
+  timeoutMs = 30000
 ): Promise<TtsSpeechData> {
   const clean = cleanSpokenText(text);
   if (!clean) {
@@ -63,6 +64,8 @@ export async function fetchEdgeTts(
   }
 
   const requestPromise = (async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch("/api/tts", {
         method: "POST",
@@ -73,19 +76,24 @@ export async function fetchEdgeTts(
           text: clean,
           voice,
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
-        throw new Error(`Erreur TTS (HTTP ${response.status})`);
+        throw new Error(`HTTP ${response.status}`);
       }
 
       const data = await response.json();
       if (!data.success) {
-        throw new Error(data.error || "Échec de génération TTS");
+        throw new Error(data.error || "Réponse TTS invalide");
+      }
+
+      if (typeof data.audioBase64 !== "string" || !data.audioBase64.trim()) {
+        throw new Error("La réponse TTS ne contient pas d’audio.");
       }
 
       const speechData: TtsSpeechData = {
-        audioBase64: data.audioBase64 || "",
+        audioBase64: data.audioBase64,
         durationSec: data.durationSec || 0,
         words: Array.isArray(data.words) ? data.words : [],
         mimeType: data.mimeType || "audio/mp3",
@@ -96,15 +104,9 @@ export async function fetchEdgeTts(
       return speechData;
     } catch (err) {
       console.warn("[TTS Service] Failed to synthesize:", err);
-      // Fallback empty result so player doesn't crash
-      return {
-        audioBase64: "",
-        durationSec: 2.0,
-        words: [],
-        mimeType: "audio/mp3",
-        voice,
-      };
+      throw new Error("Échec de la génération audio (TTS)");
     } finally {
+      clearTimeout(timeoutId);
       pendingRequests.delete(cacheKey);
     }
   })();

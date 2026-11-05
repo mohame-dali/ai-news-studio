@@ -10,6 +10,63 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+interface CommandResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runCommand(command: string, args: string[]): Promise<CommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+    child.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function getFfprobePath(): string {
+  if (process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
+  if (!process.env.FFMPEG_PATH) return 'ffprobe';
+
+  const ffmpegPath = process.env.FFMPEG_PATH;
+  if (!path.dirname(ffmpegPath) || path.dirname(ffmpegPath) === '.') return 'ffprobe';
+  const extension = path.extname(ffmpegPath);
+  const executableName = path.basename(ffmpegPath, extension);
+  const probeName = executableName.replace(/ffmpeg/i, 'ffprobe');
+  return probeName === executableName ? 'ffprobe' : path.join(path.dirname(ffmpegPath), `${probeName}${extension}`);
+}
+
+async function probeMedia(filePath: string) {
+  const result = await runCommand(getFfprobePath(), [
+    '-v', 'error',
+    '-show_entries', 'format=format_name,duration:stream=codec_type,codec_name',
+    '-of', 'json',
+    filePath,
+  ]);
+  if (result.code !== 0) {
+    throw new Error(`Échec de vérification ffprobe : ${result.stderr.trim() || `code ${result.code}`}`);
+  }
+
+  const probe = JSON.parse(result.stdout) as {
+    format?: { format_name?: string; duration?: string };
+    streams?: Array<{ codec_type?: string; codec_name?: string }>;
+  };
+  const duration = Number(probe.format?.duration);
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error('ffprobe n’a pas retourné une durée vidéo valide.');
+  }
+  return { formatName: probe.format?.format_name || '', duration, streams: probe.streams || [] };
+}
+
 export function viteTranscodePlugin(): Plugin {
   return {
     name: 'vite-plugin-ffmpeg-transcode',
@@ -28,6 +85,12 @@ export function viteTranscodePlugin(): Plugin {
           const tempId = `transcode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const inputPath = path.join(os.tmpdir(), `${tempId}.webm`);
           const outputPath = path.join(os.tmpdir(), `${tempId}.mp4`);
+          const cleanup = async () => {
+            await Promise.all([
+              fs.promises.unlink(inputPath).catch(() => undefined),
+              fs.promises.unlink(outputPath).catch(() => undefined),
+            ]);
+          };
 
           try {
             console.log(`[FFmpeg Transcode] Receiving video stream for processing...`);
@@ -65,70 +128,53 @@ export function viteTranscodePlugin(): Plugin {
               outputPath,
             ];
 
-            console.log(`[FFmpeg Transcode] Running: ffmpeg ${ffmpegArgs.join(' ')}`);
-            const ffmpeg = spawn('/usr/bin/ffmpeg', ffmpegArgs);
+            const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+            console.log(`[FFmpeg Transcode] Running: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
+            const ffmpegResult = await runCommand(ffmpegPath, ffmpegArgs);
+            if (ffmpegResult.code !== 0 || !fs.existsSync(outputPath)) {
+              throw new Error(`Erreur FFmpeg (code ${ffmpegResult.code}): ${ffmpegResult.stderr.slice(-800)}`);
+            }
 
-            let stderrOutput = '';
-            ffmpeg.stderr.on('data', (d) => {
-              stderrOutput += d.toString();
-            });
+            const expectedDuration = Number(req.headers['x-expected-duration']);
+            if (!Number.isFinite(expectedDuration) || expectedDuration <= 0) {
+              throw new Error('Durée attendue absente ou invalide pour vérifier la vidéo exportée.');
+            }
+            const probe = await probeMedia(outputPath);
+            const hasH264 = probe.streams.some((stream) => stream.codec_type === 'video' && stream.codec_name === 'h264');
+            const hasAac = probe.streams.some((stream) => stream.codec_type === 'audio' && stream.codec_name === 'aac');
+            if (!probe.formatName.split(',').includes('mp4') || !hasH264 || !hasAac) {
+              throw new Error('La sortie vérifiée n’est pas un MP4 H.264/AAC.');
+            }
+            if (Math.abs(probe.duration - expectedDuration) > 0.5) {
+              throw new Error(
+                `Durée MP4 invalide : ${probe.duration.toFixed(2)} s au lieu de ${expectedDuration.toFixed(2)} s.`
+              );
+            }
 
-            ffmpeg.on('close', async (code) => {
-              try {
-                if (code === 0 && fs.existsSync(outputPath)) {
-                  const stat = await fs.promises.stat(outputPath);
-                  console.log(`[FFmpeg Transcode] Success! Output size: ${(stat.size / (1024 * 1024)).toFixed(2)} MB`);
+            const stat = await fs.promises.stat(outputPath);
+            console.log(`[FFmpeg Transcode] Verified MP4 H.264/AAC (${probe.duration.toFixed(2)} s)`);
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'video/mp4');
+            res.setHeader('Content-Length', stat.size);
+            res.setHeader('Content-Disposition', 'attachment; filename="video-actualite-broadcast.mp4"');
 
-                  res.statusCode = 200;
-                  res.setHeader('Content-Type', 'video/mp4');
-                  res.setHeader('Content-Length', stat.size);
-                  res.setHeader('Content-Disposition', 'attachment; filename="video-actualite-broadcast.mp4"');
-
-                  const readStream = fs.createReadStream(outputPath);
-                  readStream.pipe(res);
-
-                  readStream.on('close', () => {
-                    // Safe cleanup of temporary working files
-                    fs.promises.unlink(inputPath).catch(() => {});
-                    fs.promises.unlink(outputPath).catch(() => {});
-                  });
-                } else {
-                  console.error(`[FFmpeg Transcode] Error exit code ${code}:`, stderrOutput.slice(-800));
-                  res.statusCode = 500;
-                  res.setHeader('Content-Type', 'application/json');
-                  res.end(
-                    JSON.stringify({
-                      success: false,
-                      error: `Erreur FFmpeg (code ${code}): ${stderrOutput.slice(-300)}`,
-                    })
-                  );
-                  fs.promises.unlink(inputPath).catch(() => {});
-                  if (fs.existsSync(outputPath)) {
-                    fs.promises.unlink(outputPath).catch(() => {});
-                  }
-                }
-              } catch (err: any) {
-                console.error('[FFmpeg Transcode Stream Error]:', err);
+            const readStream = fs.createReadStream(outputPath);
+            readStream.on('close', () => void cleanup());
+            readStream.on('error', (err) => {
+              console.error('[FFmpeg Transcode Stream Error]:', err);
+              if (!res.headersSent) {
                 res.statusCode = 500;
-                res.setHeader('Content-Type', 'application/json');
-                res.end(JSON.stringify({ success: false, error: err.message || 'Erreur interne de transcodage.' }));
+                res.end(JSON.stringify({ success: false, error: 'Erreur lors de l’envoi du MP4 vérifié.' }));
               }
+              void cleanup();
             });
-
-            ffmpeg.on('error', (err) => {
-              console.error('[FFmpeg Spawn Error]:', err);
-              res.statusCode = 500;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ success: false, error: `Impossible de lancer FFmpeg : ${err.message}` }));
-              fs.promises.unlink(inputPath).catch(() => {});
-            });
+            readStream.pipe(res);
           } catch (err: any) {
             console.error('[FFmpeg Handler Error]:', err);
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ success: false, error: err.message || 'Erreur lors du traitement du flux vidéo.' }));
-            if (fs.existsSync(inputPath)) fs.promises.unlink(inputPath).catch(() => {});
-            if (fs.existsSync(outputPath)) fs.promises.unlink(outputPath).catch(() => {});
+            await cleanup();
           }
           return;
         }

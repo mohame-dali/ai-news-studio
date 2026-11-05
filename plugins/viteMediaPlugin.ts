@@ -2,9 +2,9 @@ import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { URL } from 'node:url';
 
-export interface PexelsMediaItem {
+export interface OpenverseMediaItem {
   id: string | number;
-  type: 'video' | 'image';
+  type: 'image';
   url: string;
   thumbnail: string;
   author: string;
@@ -12,7 +12,36 @@ export interface PexelsMediaItem {
   attribution: string;
   width?: number;
   height?: number;
-  duration?: number;
+  license: string;
+  licenseUrl: string;
+  source: 'Openverse';
+  title?: string;
+}
+
+let openverseQueue: Promise<void> = Promise.resolve();
+let lastOpenverseRequestAt = 0;
+
+function fetchOpenverseQueued(url: string): Promise<Response> {
+  const request = openverseQueue.then(async () => {
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      const delay = Math.max(0, 1000 - (Date.now() - lastOpenverseRequestAt));
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+      lastOpenverseRequestAt = Date.now();
+
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'AINewsStudio/1.0 (contact@example.com)',
+          'Accept': 'application/json',
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.status !== 429 || attempt === 2) return response;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error('Échec inattendu de la requête Openverse.');
+  });
+  openverseQueue = request.then(() => undefined, () => undefined);
+  return request;
 }
 
 export function viteMediaPlugin(): Plugin {
@@ -23,8 +52,7 @@ export function viteMediaPlugin(): Plugin {
         if (!req.url) return next();
         const fullUrl = new URL(req.url, 'http://127.0.0.1:3000');
 
-        // Pexels search endpoint
-        if (fullUrl.pathname === '/api/media/search') {
+        if (fullUrl.pathname === '/api/media/openverse') {
           if (req.method !== 'GET') {
             res.statusCode = 405;
             res.setHeader('Content-Type', 'application/json');
@@ -34,9 +62,6 @@ export function viteMediaPlugin(): Plugin {
 
           const rawQuery = fullUrl.searchParams.get('query') || '';
           const query = rawQuery.trim();
-          const perPage = Math.min(10, Math.max(1, parseInt(fullUrl.searchParams.get('per_page') || '5', 10)));
-          const apiKey = process.env.PEXELS_API_KEY?.trim();
-
           if (!query) {
             res.statusCode = 400;
             res.setHeader('Content-Type', 'application/json');
@@ -44,134 +69,66 @@ export function viteMediaPlugin(): Plugin {
             return;
           }
 
-          if (!apiKey) {
-            console.warn('[Pexels Proxy] Variable d\'environnement PEXELS_API_KEY absente. Retour de liste vide.');
-            res.statusCode = 200;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(
-              JSON.stringify({
-                success: true,
-                apiKeyConfigured: false,
-                query,
-                videos: [],
-                images: [],
-                items: [],
-                warning: 'PEXELS_API_KEY non configurée. Définissez PEXELS_API_KEY dans votre fichier .env pour activer la recherche B-roll légale.',
-              })
-            );
-            return;
-          }
-
           try {
-            console.log(`[Pexels Proxy] Searching B-roll videos for query: "${query}"`);
-
-            // 1. Search Videos
-            const videoEndpoint = `https://api.pexels.com/videos/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=${perPage}`;
-            const videoRes = await fetch(videoEndpoint, {
-              headers: {
-                Authorization: apiKey,
-                'User-Agent': 'AINewsStudio/1.0',
-              },
-              signal: AbortSignal.timeout(10000),
-            });
-
-            const videos: PexelsMediaItem[] = [];
-
-            if (videoRes.ok) {
-              const videoData = (await videoRes.json()) as any;
-              for (const v of videoData.videos || []) {
-                // Find best portrait mp4 file
-                const files = v.video_files || [];
-                const portraitMp4 = files.find(
-                  (f: any) => f.height >= f.width && f.file_type === 'video/mp4'
-                );
-                const hdMp4 = files.find((f: any) => f.quality === 'hd' && f.file_type === 'video/mp4');
-                const anyMp4 = files.find((f: any) => f.file_type === 'video/mp4');
-                const chosen = portraitMp4 || hdMp4 || anyMp4 || files[0];
-
-                if (chosen?.link) {
-                  const authorName = v.user?.name || 'Créateur Pexels';
-                  videos.push({
-                    id: v.id,
-                    type: 'video',
-                    url: chosen.link,
-                    thumbnail: v.image || chosen.link,
-                    author: authorName,
-                    authorUrl: v.user?.url,
-                    attribution: `Vidéo : ${authorName} / Pexels`,
-                    width: chosen.width || v.width,
-                    height: chosen.height || v.height,
-                    duration: v.duration,
-                  });
-                }
-              }
-            } else {
-              console.warn(`[Pexels Proxy] Video search returned HTTP ${videoRes.status}: ${videoRes.statusText}`);
+            const endpoint = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&license=cc0,pdm,by&license_type=commercial,modification&page_size=5&filter_dead=true`;
+            const openverseRes = await fetchOpenverseQueued(endpoint);
+            if (!openverseRes.ok) {
+              res.statusCode = openverseRes.status === 429 ? 429 : 502;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: false, error: `Erreur API Openverse : HTTP ${openverseRes.status}` }));
+              return;
             }
 
-            // 2. Search Photos (if fewer than 2 videos found or as complementary B-roll)
-            const images: PexelsMediaItem[] = [];
-            if (videos.length < 2) {
-              try {
-                const photoEndpoint = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&orientation=portrait&per_page=${perPage}`;
-                const photoRes = await fetch(photoEndpoint, {
-                  headers: {
-                    Authorization: apiKey,
-                    'User-Agent': 'AINewsStudio/1.0',
-                  },
-                  signal: AbortSignal.timeout(10000),
-                });
-
-                if (photoRes.ok) {
-                  const photoData = (await photoRes.json()) as any;
-                  for (const p of photoData.photos || []) {
-                    const authorName = p.photographer || 'Photographe Pexels';
-                    const imageUrl = p.src?.large2x || p.src?.large || p.src?.portrait || p.src?.original;
-                    if (imageUrl) {
-                      images.push({
-                        id: p.id,
-                        type: 'image',
-                        url: imageUrl,
-                        thumbnail: p.src?.medium || imageUrl,
-                        author: authorName,
-                        authorUrl: p.photographer_url,
-                        attribution: `Photo : ${authorName} / Pexels`,
-                        width: p.width,
-                        height: p.height,
-                      });
-                    }
-                  }
-                }
-              } catch (photoErr) {
-                console.warn('[Pexels Proxy] Secondary photo search failed:', photoErr);
-              }
-            }
-
-            const combinedItems = [...videos, ...images];
+            const data = (await openverseRes.json()) as {
+              results?: Array<{
+                id?: string;
+                url?: string;
+                thumbnail?: string;
+                creator?: string;
+                creator_url?: string;
+                license?: string;
+                license_url?: string;
+                title?: string;
+                width?: number;
+                height?: number;
+              }>;
+            };
+            const items: OpenverseMediaItem[] = (data.results || [])
+              .filter((item) => typeof item.url === 'string' && /^https?:\/\//i.test(item.url))
+              .map((item) => {
+                const author = item.creator?.trim() || 'Créateur non indiqué';
+                const license = item.license?.trim().toUpperCase() || 'CC BY';
+                const licenseUrl = item.license_url || 'https://creativecommons.org/licenses/';
+                return {
+                  id: item.id || item.url!,
+                  type: 'image' as const,
+                  url: item.url!,
+                  thumbnail: item.thumbnail || item.url!,
+                  author,
+                  authorUrl: item.creator_url,
+                  license,
+                  licenseUrl,
+                  attribution: `Photo : ${author} / ${license} / Openverse`,
+                  width: item.width,
+                  height: item.height,
+                  title: item.title,
+                  source: 'Openverse' as const,
+                };
+              })
+              .sort((a, b) => (b.width || 0) * (b.height || 0) - (a.width || 0) * (a.height || 0));
+            const item = items[0] || null;
 
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');
-            res.end(
-              JSON.stringify({
-                success: true,
-                apiKeyConfigured: true,
-                query,
-                count: combinedItems.length,
-                videos,
-                images,
-                items: combinedItems,
-              })
-            );
-          } catch (err: any) {
-            console.error('[Pexels Proxy] Error communicating with Pexels API:', err);
+            res.end(JSON.stringify({ success: true, query, count: items.length, item, items }));
+          } catch (err: unknown) {
+            console.error('[Openverse Proxy] Erreur de communication avec l’API :', err);
             res.statusCode = 502;
             res.setHeader('Content-Type', 'application/json');
-            res.end(
-              JSON.stringify({
-                success: false,
-                error: `Erreur API Pexels : ${err.message || String(err)}`,
-              })
-            );
+            res.end(JSON.stringify({
+              success: false,
+              error: `Erreur API Openverse : ${err instanceof Error ? err.message : String(err)}`,
+            }));
           }
           return;
         }

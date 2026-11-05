@@ -1,6 +1,7 @@
 import React, { FC, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  App,
   Button,
   Card,
   Flex,
@@ -9,12 +10,16 @@ import {
   Select,
   Tag,
   Typography,
-  message,
 } from "antd";
 import { LoadingOutlined, PlayCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { defaultBrands, defaultFetchers, buildDefaultConfig } from "@/lib/constants";
 import { generateManuscriptFromInput } from "@/lib/articleGenerator";
-import { rankNewsWithOllama } from "@/services/ollamaClient";
+import {
+  assertOllamaRunning,
+  rankNewsWithOllama,
+  resetOllamaFallbackStatus,
+  wasOllamaFallbackUsed,
+} from "@/services/ollamaClient";
 import { DurationOption, NewsGroupItem, RankedNewsItem } from "@/types";
 import { useGlobalState } from "@/state/globalState";
 import { getProjectList, saveGeneration, GenerationRecord } from "@/lib/storage";
@@ -37,9 +42,11 @@ interface Props {
 }
 
 export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
+  const { message } = App.useApp();
   const [form] = Form.useForm<FormType>();
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState(fr.start.generating);
+  const [fallbackGenerationId, setFallbackGenerationId] = useState<string | null>(null);
   const [recentProjects, setRecentProjects] = useState<{ id: string; name: string }[]>([]);
   const [newsItems, setNewsItems] = useState<RankedNewsItem[]>([]);
   const [sourceStatuses, setSourceStatuses] = useState<SourceStatus[]>([]);
@@ -126,9 +133,12 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
     const brand = defaultBrands.find((b) => b.id === brandId) || defaultBrands[0];
 
     setLoading(true);
+    setFallbackGenerationId(null);
+    resetOllamaFallbackStatus();
     setLoadingMessage(fr.start.fetchingArticle);
 
     try {
+      await assertOllamaRunning();
       setLoadingMessage(fr.start.applyingBrand);
       await new Promise((res) => setTimeout(res, 300));
 
@@ -208,8 +218,12 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
       setGenerationId(result.projectId);
       setSelectedProject(projectOption);
 
-      message.success("Sujet vidéo généré avec succès !");
-      onNavigateToEditor(result.projectId);
+      if (wasOllamaFallbackUsed()) {
+        setFallbackGenerationId(result.projectId);
+      } else {
+        message.success("Sujet vidéo généré avec succès !");
+        onNavigateToEditor(result.projectId);
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : "Erreur de génération du sujet vidéo", 7);
     } finally {
@@ -298,6 +312,26 @@ export const StartPage: FC<Props> = ({ onNavigateToEditor }) => {
         className="w-full max-w-[80ch] shadow-xl border-gray-200 dark:border-gray-800"
         styles={{ body: { padding: "2rem" } }}
       >
+        {fallbackGenerationId && (
+          <Alert
+            className="mb-4"
+            type="warning"
+            showIcon
+            message="Génération terminée en mode secours (Ollama trop lent). Veuillez vérifier le script manuellement."
+            action={
+              <Button
+                size="small"
+                onClick={() => {
+                  const generationId = fallbackGenerationId;
+                  setFallbackGenerationId(null);
+                  onNavigateToEditor(generationId);
+                }}
+              >
+                Ouvrir l’éditeur
+              </Button>
+            }
+          />
+        )}
         <Form form={form} onFinish={loadManuscript} layout="vertical">
           {/* Fetcher Selection */}
           <Form.Item name="fetcherId" label={fr.start.fetcherLabel} rules={[{ required: true }]}>

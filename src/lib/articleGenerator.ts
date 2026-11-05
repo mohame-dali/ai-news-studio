@@ -9,8 +9,9 @@ import {
   TextPlacement,
 } from "@/types";
 import { extractFactsWithOllama, generateSectionWithOllama } from "@/services/ollamaClient";
-import { DURATION_PRESETS, isSensitiveTopic } from "./constants";
+import { DURATION_PRESETS, EDITORIAL_RULES_PROMPT, isSensitiveTopic } from "./constants";
 import { fetchMediaCollectionForSegments, MediaResult } from "@/services/mediaService";
+import { validateHookCandidate } from "@/lib/editorialRules";
 
 /**
  * Scrapes a real web article using the Vite backend proxy /api/scrape-url
@@ -313,25 +314,46 @@ export async function generateManuscriptFromInput(
   const facts = await extractFactsWithOllama(content);
   const sectionDefinitions = [
     ["accroche", "Accroche"],
-    ["contexte", "Contexte"],
     ["faits_cles", "Faits clés"],
     ["impact", "Impact"],
-    ["suite", "Suite"],
+    ["suite", isSensitive ? "Clôture factuelle (sujet sensible)" : "Question finale"],
   ] as const;
   const sectionLines: string[] = [];
   for (const [key, label] of sectionDefinitions) {
     options.onProgress?.(`Rédaction : ${label.toLowerCase()}`);
-    const lines = await generateSectionWithOllama(key, label, facts, duration.sectionsBudget[key], isSensitive);
+    const modelSectionLabel = `${label}\n${EDITORIAL_RULES_PROMPT}`;
+    const lines = await generateSectionWithOllama(
+      key,
+      modelSectionLabel,
+      facts,
+      duration.sectionsBudget[key],
+      isSensitive
+    );
+    if (lines.length !== 1) {
+      throw new Error(`La section « ${label} » doit produire une phrase unique.`);
+    }
+    if (key === "accroche") {
+      const hook = lines[0]?.trim() || "";
+      const isGenericIntro =
+        /^(?:bonjour|bienvenue|dans cette vidéo|voici (?:l'actualité|notre sujet)|aujourd'hui,? nous)\b/i.test(hook);
+      const isSupported = facts.some(
+        (_, index) =>
+          validateHookCandidate({ text: hook, supportingFactId: `fact-${index + 1}` }, facts) === null
+      );
+      if (!isSupported || isGenericIntro) {
+        throw new Error("Accroche refusée : elle ne correspond pas assez clairement à un fait source vérifié.");
+      }
+    }
     sectionLines.push(...lines);
   }
   const sentences = sectionLines;
 
-  // STEP 3 — REAL LEGAL MEDIA ACQUISITION (PEXELS API)
-  let pexelsMediaList: (MediaResult | null)[] = [];
+  // STEP 3 — openly licensed image acquisition through Openverse
+  let openverseMediaList: (MediaResult | null)[] = [];
   try {
-    pexelsMediaList = await fetchMediaCollectionForSegments(title, sentences);
+    openverseMediaList = await fetchMediaCollectionForSegments(title, sentences, content);
   } catch (mediaErr) {
-    console.warn("[ArticleGenerator] Pexels media collection failed:", mediaErr);
+    console.warn("[ArticleGenerator] Échec de la recherche d’images Openverse :", mediaErr);
   }
 
   const moodsList: Mood[] = ["neutral", "dramatic", "hopeful", "upbeat"];
@@ -353,16 +375,20 @@ export async function generateManuscriptFromInput(
 
     let mainMedia: MediaAssetType;
 
-    // Use real extracted image for the first segment if available
-    if (index === 0 && articleImage) {
+    const openverseItem = openverseMediaList[index];
+    if (openverseItem?.url) {
       mainMedia = {
         type: "image",
-        url: articleImage,
-        byline: publisher ? `Photo : ${publisher}` : "Illustration source de l'article",
-        description: title,
+        url: openverseItem.url,
+        byline: openverseItem.attribution,
+        author: openverseItem.author,
+        license: openverseItem.license,
+        licenseUrl: openverseItem.licenseUrl,
+        source: "Openverse",
+        description: openverseItem.description || openverseItem.title || title,
         imageAsset: {
-          id: `img-scraped-${Date.now()}`,
-          size: { width: 1200, height: 800 },
+          id: `img-openverse-${index}-${Date.now()}`,
+          size: { width: openverseItem.width || 1200, height: openverseItem.height || 800 },
         },
         hotspot: {
           x: 200,
@@ -376,51 +402,17 @@ export async function generateManuscriptFromInput(
         },
       };
     } else {
-      // Use Pexels legal media item
-      const pexelsItem = pexelsMediaList[index] || pexelsMediaList[0];
-      if (pexelsItem && pexelsItem.url) {
-        if (pexelsItem.type === "video") {
-          mainMedia = {
-            type: "video",
-            url: pexelsItem.url,
-            byline: pexelsItem.attribution,
-            description: title,
-            startFrom: 0,
-            endAt: duration,
-            videoAsset: {
-              id: `video-pexels-${index}-${Date.now()}`,
-              title: `${title} - B-roll ${index + 1}`,
-              duration: pexelsItem.duration || 15,
-              streamUrls: {
-                mp4: pexelsItem.url,
-              },
-            },
-          };
-        } else {
-          mainMedia = {
-            type: "image",
-            url: pexelsItem.url,
-            byline: pexelsItem.attribution,
-            description: title,
-            imageAsset: {
-              id: `img-pexels-${index}-${Date.now()}`,
-              size: { width: pexelsItem.width || 1080, height: pexelsItem.height || 1920 },
-            },
-          };
-        }
-      } else {
-        // Fallback: No random photos. Clean solid editorial background card.
-        mainMedia = {
-          type: "image",
-          url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1080' height='1920'><rect width='100%' height='100%' fill='%230f172a'/></svg>",
-          byline: "Rédaction AI News Studio",
-          description: title,
-          imageAsset: {
-            id: `img-fallback-${index}`,
-            size: { width: 1080, height: 1920 },
-          },
-        };
-      }
+      console.warn("Aucune image trouvée sur Openverse. Utilisation de la carte graphique.");
+      mainMedia = {
+        type: "image",
+        url: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1080' height='1920'><rect width='100%' height='100%' fill='%230f172a'/></svg>",
+        byline: "Rédaction AI News Studio",
+        description: title,
+        imageAsset: {
+          id: `img-fallback-${index}`,
+          size: { width: 1080, height: 1920 },
+        },
+      };
     }
 
     return {

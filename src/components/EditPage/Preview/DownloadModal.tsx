@@ -6,6 +6,8 @@ import { fr } from "@/lib/i18n";
 import { recordPlayerVideo, ExportProgress } from "@/services/videoExportRecorder";
 import { fetchEdgeTts } from "@/services/ttsService";
 import { parsePronunciationText } from "@/lib/manuscriptProcessor";
+import { generateTikTokMetadata, type ExtractedFact, type TikTokMetadata } from "@/services/ollamaClient";
+import type { MediaAssetType, SegmentType } from "@/types";
 
 const videoTypes = [
   {
@@ -44,11 +46,18 @@ type FormType = {
   title: string;
 };
 
+function getAllRenderedMedia(segment: SegmentType): MediaAssetType[] {
+  const media = [...(segment.mainMedia ? [segment.mainMedia] : []), ...(segment.images || [])];
+  return media.filter((item, index) => media.indexOf(item) === index);
+}
+
 export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
   const { tabs, processedManuscripts, config } = useGlobalState();
   const [downloadForm] = Form.useForm<FormType>();
   const [isProcessing, setIsProcessing] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [tiktokMetadata, setTiktokMetadata] = useState<TikTokMetadata | null>(null);
+  const [isMetadataLoading, setIsMetadataLoading] = useState(false);
   const [exportProgress, setExportProgress] = useState<ExportProgress>({
     percent: 0,
     message: "",
@@ -56,60 +65,52 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
 
   // Extract unique media attributions across all segments
   const mediaAttributions = useMemo(() => {
-    const list: string[] = [];
+    const list: { text: string; licenseUrl?: string }[] = [];
     processedManuscripts.forEach((m) => {
       (m.segments || []).forEach((s) => {
-        const media = s.mainMedia;
-        if (!media) return;
-        const author = media.author || (media.byline ? media.byline.replace(/^📷\s*/, "") : "");
-        const license = media.license || "";
-        const mediaUrl = "url" in media && typeof media.url === "string" ? media.url : "";
-        const source = media.source || (mediaUrl.includes("wikimedia") ? "Wikimedia Commons" : mediaUrl.includes("pexels") ? "Pexels" : "");
-        
-        let attr = "";
-        if (author && license && source) {
-          attr = `${media.type === "video" ? "Vidéo" : "Photo"} : ${author} · ${license} (${source})`;
-        } else if (author && source) {
-          attr = `${media.type === "video" ? "Vidéo" : "Photo"} : ${author} (${source})`;
-        } else if (media.byline) {
-          attr = media.byline;
-        }
+        getAllRenderedMedia(s).forEach((media) => {
+          const author = media.author || (media.byline ? media.byline.replace(/^📷\s*/, "") : "");
+          const license = media.license || "";
+          const mediaUrl = "url" in media && typeof media.url === "string" ? media.url : "";
+          const source =
+            media.source ||
+            (mediaUrl.includes("wikimedia") ? "Wikimedia Commons" : mediaUrl.includes("openverse") ? "Openverse" : "");
 
-        if (attr && !list.includes(attr)) {
-          list.push(attr);
-        }
+          let attr = "";
+          if (source === "Openverse" && author && license) {
+            attr = `Photo : ${author} / ${license} / Openverse`;
+          } else if (author && license && source) {
+            attr = `${media.type === "video" ? "Vidéo" : "Photo"} : ${author} · ${license} (${source})`;
+          } else if (author && source) {
+            attr = `${media.type === "video" ? "Vidéo" : "Photo"} : ${author} (${source})`;
+          } else if (media.byline) {
+            attr = media.byline;
+          }
+
+          if (attr && !list.some((item) => item.text === attr)) {
+            list.push({ text: attr, licenseUrl: media.licenseUrl });
+          }
+        });
       });
     });
     return list;
   }, [processedManuscripts]);
 
-  // Strict Rights Card Enforcement: identify any segment with external media that lacks license certification
+  // Every item selected for rendering must have explicit license certification.
   const unvalidatedSegments = useMemo(() => {
     const issues: { segmentIdx: number; title: string; source: string; license?: string }[] = [];
     let count = 0;
     processedManuscripts.forEach((m) => {
       (m.segments || []).forEach((s) => {
         count++;
-        const media = s.mainMedia;
-        const mediaUrl = media && "url" in media && typeof media.url === "string" ? media.url : "";
-        const hasExternalMedia =
-          Boolean(mediaUrl) &&
-          !mediaUrl.startsWith("data:image/svg+xml") &&
-          (mediaUrl.startsWith("http://") ||
-            mediaUrl.startsWith("https://") ||
-            Boolean(media?.source) ||
-            Boolean(media?.license)) &&
-          s.graphicMode !== "number" &&
-          s.graphicMode !== "quote" &&
-          s.graphicMode !== "map";
-
-        if (hasExternalMedia && s.licenseValidated !== true) {
+        const uncertifiedMedia = getAllRenderedMedia(s).filter((media) => media.licenseValidated !== true);
+        if (uncertifiedMedia.length > 0) {
           const segTitle = (s.texts && s.texts[0]?.displayText) || s.text || `Séquence ${count}`;
           issues.push({
             segmentIdx: count,
             title: segTitle.slice(0, 32),
-            source: media?.source || "Média externe",
-            license: media?.license,
+            source: uncertifiedMedia.map((media) => media.source || "Média externe").join(", "),
+            license: uncertifiedMedia.map((media) => media.license).filter(Boolean).join(", ") || undefined,
           });
         }
       });
@@ -118,6 +119,16 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
   }, [processedManuscripts]);
 
   const hasUnvalidatedRights = unvalidatedSegments.length > 0;
+  const metadataFacts = useMemo<ExtractedFact[]>(() => processedManuscripts.flatMap((manuscript) =>
+    (manuscript.segments || [])
+      .map((segment) => segment.text || segment.texts?.[0]?.displayText || "")
+      .filter((fact) => fact.trim().length >= 5)
+      .map((fact) => ({ fact: fact.trim() }))
+  ), [processedManuscripts]);
+  const metadataScript = metadataFacts.map(({ fact }) => fact).join(" ");
+  const metadataSources = [...new Set(processedManuscripts.flatMap((manuscript) =>
+    manuscript.meta.sources?.map((source) => source.name) || []
+  ))];
 
   // Get editorial status from the first tab
   const editorialStatus = tabs[0]?.editorialStatus || "under_review";
@@ -146,42 +157,49 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
   };
 
   const downloadAudio = async (title: string) => {
-    try {
-      const allTexts: string[] = [];
-      processedManuscripts.forEach((m) => {
-        (m.segments || []).forEach((s) => {
-          const raw = s.text || (s.texts && s.texts[0]?.displayText) || "";
-          const [, spoken] = parsePronunciationText(raw);
-          if (spoken.trim()) allTexts.push(spoken.trim());
-        });
+    const allTexts: string[] = [];
+    processedManuscripts.forEach((m) => {
+      (m.segments || []).forEach((s) => {
+        const raw = s.text || (s.texts && s.texts[0]?.displayText) || "";
+        const [, spoken] = parsePronunciationText(raw);
+        if (spoken.trim()) allTexts.push(spoken.trim());
       });
+    });
 
-      const fullScript = allTexts.join(". ");
-      if (fullScript) {
-        const data = await fetchEdgeTts(fullScript, "fr-FR-DeniseNeural");
-        if (data.audioBase64) {
-          const a = document.createElement("a");
-          a.href = data.audioBase64;
-          a.download = `${title || "narration-voix"}.mp3`;
-          a.click();
-          message.success("Piste audio Edge-TTS téléchargée avec succès (.mp3)");
-          setOpen(false);
-          return;
-        }
-      }
-    } catch (err) {
-      console.warn("Failed to generate complete audio track:", err);
+    const fullScript = allTexts.join(". ");
+    if (!fullScript) {
+      throw new Error("Aucun texte disponible pour générer la piste audio.");
     }
 
-    const firstAudioSrc =
-      processedManuscripts[0]?.meta?.audio?.src || "/assets/voice-sample.wav";
-
+    const data = await fetchEdgeTts(fullScript, "fr-FR-DeniseNeural");
+    if (!data.audioBase64) throw new Error("Échec de la génération audio (TTS)");
     const a = document.createElement("a");
-    a.href = firstAudioSrc;
-    a.download = `${title || "narration-voix"}.wav`;
+    a.href = data.audioBase64;
+    a.download = `${title || "narration-voix"}.mp3`;
     a.click();
-    message.success("Piste audio de narration téléchargée");
+    message.success("Piste audio Edge-TTS téléchargée avec succès (.mp3)");
     setOpen(false);
+  };
+
+  const handleGenerateMetadata = async () => {
+    setIsMetadataLoading(true);
+    try {
+      const generated = await generateTikTokMetadata(metadataScript, metadataFacts, metadataSources);
+      setTiktokMetadata(generated);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Impossible de générer les métadonnées TikTok.");
+    } finally {
+      setIsMetadataLoading(false);
+    }
+  };
+
+  const copyMetadata = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      message.success(`${label} copié.`);
+    } catch {
+      message.error(`Impossible de copier ${label.toLowerCase()} dans le presse-papiers.`);
+    }
   };
 
   const exportRightsAuditLog = () => {
@@ -194,9 +212,9 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
         const media = s.mainMedia;
         const mediaUrl = media && "url" in media && typeof media.url === "string" ? media.url : "";
         const author = media?.author || (media?.byline ? media.byline.replace(/^📷\s*/, "") : "Rédaction / Interne");
-        const license = media?.license || (media?.source === "Pexels" ? "Licence Pexels" : media?.source === "Wikimedia Commons" ? "Creative Commons" : "Droits réservés / Usage autorisé");
+        const license = media?.license || (media?.source === "Wikimedia Commons" ? "Creative Commons" : "Droits réservés / Usage autorisé");
         const licenseUrl = media?.licenseUrl || "";
-        const source = media?.source || (mediaUrl.includes("wikimedia") ? "Wikimedia Commons" : mediaUrl.includes("pexels") ? "Pexels" : "Production interne");
+        const source = media?.source || (mediaUrl.includes("wikimedia") ? "Wikimedia Commons" : mediaUrl.includes("openverse") ? "Openverse" : "Production interne");
         const blurCount = (media && "blurRegions" in media && media.blurRegions ? media.blurRegions.length : s.blurRegions?.length || 0);
 
         segmentsAudit.push({
@@ -258,6 +276,12 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
         return;
       }
 
+      if (values.exportType === "Piste audio seule" && (!values.audio || !values.voice)) {
+        message.error("Activez l'audio principal et la voix off pour exporter la piste audio.");
+        setIsProcessing(false);
+        return;
+      }
+
       // All other exports require approval and media rights certification
       if (!isApproved) {
         message.error(fr.editorial.approvalRequiredForDownload);
@@ -266,15 +290,23 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
       }
 
       if (hasUnvalidatedRights) {
-        message.error(
-          "Export bloqué : vous devez certifier la licence de tous les médias externes avant d'exporter la vidéo ou l'audio."
-        );
+        message.error("Export bloqué : certifiez la licence de tous les médias rendus avant l'export.");
         setIsProcessing(false);
         return;
       }
 
+      if (values.audio && values.voice && values.exportType !== "Piste audio seule") {
+        for (const manuscript of processedManuscripts) {
+          for (const segment of manuscript.segments || []) {
+            const raw = segment.text || segment.texts?.[0]?.displayText || "";
+            const [, spoken] = parsePronunciationText(raw);
+            if (spoken.trim()) await fetchEdgeTts(spoken, "fr-FR-DeniseNeural");
+          }
+        }
+      }
+
       if (values.exportType === "Piste audio seule") {
-        downloadAudio(values.title);
+        await downloadAudio(values.title);
         return;
       }
 
@@ -296,9 +328,15 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
       );
 
       let finalBlob = result.blob;
-      let finalFilename = result.filename;
+      const finalFilename = `${values.title || "video-actualite"}-${values.exportType.toLowerCase()}.mp4`;
+      let expectedDuration = 0;
+      processedManuscripts.forEach((manuscript) => {
+        (manuscript.segments || []).forEach((segment) => {
+          expectedDuration += Math.max(2, (segment.end ?? 4) - (segment.start ?? 0));
+        });
+      });
+      if (expectedDuration === 0) expectedDuration = 10;
 
-      // 2. STEP 5: Server-side FFmpeg MP4 Transcoding (H.264, AAC, Loudnorm EBU R128)
       try {
         setExportProgress({
           percent: 96,
@@ -309,28 +347,23 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
           method: "POST",
           headers: {
             "Content-Type": result.blob.type || "video/webm",
+            "X-Expected-Duration": String(expectedDuration),
           },
           body: result.blob,
         });
 
-        if (transcodeRes.ok) {
-          finalBlob = await transcodeRes.blob();
-          finalFilename = `${values.title || "video-actualite"}-${values.exportType.toLowerCase()}.mp4`;
-          message.success("Vidéo transcodée avec succès via FFmpeg (H.264 / AAC)");
-        } else {
-          let errDetail = "";
-          try {
-            const errJson = await transcodeRes.json();
-            errDetail = errJson.error || "";
-          } catch {
-            errDetail = await transcodeRes.text();
-          }
-          message.error(`Erreur FFmpeg : ${errDetail || "Échec du transcodage serveur"}`);
-          console.warn("[FFmpeg Transcode Warning]: Utilisation de l'enregistrement brut.");
+        if (!transcodeRes.ok) {
+          const errorBody = await transcodeRes.json().catch(() => null);
+          throw new Error(errorBody?.error || `HTTP ${transcodeRes.status}`);
+        }
+        finalBlob = await transcodeRes.blob();
+        if (finalBlob.type !== "video/mp4" || finalBlob.size === 0) {
+          throw new Error("La réponse du serveur n’est pas un MP4 valide.");
         }
       } catch (transcodeErr) {
         console.error("[FFmpeg Transcode Request Error]:", transcodeErr);
-        message.error(`Erreur FFmpeg : ${transcodeErr instanceof Error ? transcodeErr.message : "Erreur réseau"}`);
+        message.error("Échec de la conversion MP4. Veuillez vérifier que FFmpeg est installé.");
+        return;
       }
 
       const finalUrl = URL.createObjectURL(finalBlob);
@@ -461,6 +494,34 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
           </Form.Item>
         </div>
 
+        <section className="mb-4 border-t border-gray-200 dark:border-gray-700 pt-4" aria-labelledby="tiktok-metadata-heading">
+          <Typography.Title id="tiktok-metadata-heading" level={5} className="!mb-2">
+            Métadonnées TikTok
+          </Typography.Title>
+          <Button
+            onClick={() => void handleGenerateMetadata()}
+            loading={isMetadataLoading}
+            disabled={metadataFacts.length === 0 || isProcessing}
+            className="mb-3"
+          >
+            Générer depuis les faits du script
+          </Button>
+          {tiktokMetadata && (
+            <div className="space-y-2">
+              {([
+                ["Titre", tiktokMetadata.title],
+                ["Description", tiktokMetadata.caption],
+                ["Hashtags", tiktokMetadata.hashtags.join(" ")],
+              ] as const).map(([label, value]) => (
+                <div key={label} className="flex items-start gap-2">
+                  <Input.TextArea aria-label={label} value={value} readOnly autoSize={{ minRows: 1, maxRows: 4 }} />
+                  <Button onClick={() => void copyMetadata(label, value)}>Copier</Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {isProcessing && (
           <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 rounded-lg">
             <div className="flex justify-between items-center mb-1 text-xs font-semibold text-blue-900 dark:text-blue-200">
@@ -496,7 +557,11 @@ export const DownloadModal: FC<Props> = ({ open, setOpen }) => {
             <ul className="list-disc list-inside text-[11px] text-gray-600 dark:text-gray-400 space-y-0.5">
               {mediaAttributions.map((attr, idx) => (
                 <li key={idx} className="truncate">
-                  {attr}
+                  {attr.licenseUrl ? (
+                    <a href={attr.licenseUrl} target="_blank" rel="noreferrer" className="underline">
+                      {attr.text}
+                    </a>
+                  ) : attr.text}
                 </li>
               ))}
             </ul>

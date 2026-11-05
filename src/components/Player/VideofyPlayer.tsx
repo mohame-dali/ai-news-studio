@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { BlurRegion, MediaAssetType, PlayerConfig, ProcessedManuscript, SegmentType } from "@/types";
 import { parsePronunciationText } from "@/lib/manuscriptProcessor";
 import { fetchEdgeTts, TtsSpeechData } from "@/services/ttsService";
+import { motionConfig } from "@/config/motionConfig";
 import {
   CaretRightOutlined,
   PauseOutlined,
@@ -48,9 +49,12 @@ export const VideofyPlayer: React.FC<Props> = ({
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
   const bgMusicRef = useRef<HTMLAudioElement | null>(null);
-  const animFrameRef = useRef<number | null>(null);
+  const musicAudioContextRef = useRef<AudioContext | null>(null);
+  const musicGainNodeRef = useRef<GainNode | null>(null);
+  const musicSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const lastTimestampRef = useRef<number | null>(null);
   const currentSegmentIdRef = useRef<string | number | null>(null);
+  const [isVoiceSpeaking, setIsVoiceSpeaking] = useState(false);
 
   // Flatten all segments across manuscripts
   const allSegments = useMemo(() => {
@@ -62,7 +66,7 @@ export const VideofyPlayer: React.FC<Props> = ({
       const mId = m.meta?.uniqueId || (m.meta as any)?.uniquId || (m as any).uniqueId || (m as any).uniquId || `m-${mIdx}`;
       (m.segments || []).forEach((s, sIdx) => {
         if (!s) return;
-        const segDuration = Math.max(1, (s.end ?? 4) - (s.start ?? 0));
+        const segDuration = Math.max(2, (s.end ?? 4) - (s.start ?? 0));
         const globalStart = offset;
         const globalEnd = offset + segDuration;
         offset = globalEnd;
@@ -128,35 +132,36 @@ export const VideofyPlayer: React.FC<Props> = ({
     };
   }, [allSegments]);
 
-  // Playhead animation loop
+  // The narration element is the preview clock while speech is playing.
   useEffect(() => {
     if (!isPlaying) {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
       lastTimestampRef.current = null;
       return;
     }
 
-    const step = (now: number) => {
-      if (lastTimestampRef.current !== null) {
-        const delta = (now - lastTimestampRef.current) / 1000;
-        setCurrentTime((prev) => {
-          const next = prev + delta;
-          if (next >= totalDuration) {
-            setIsPlaying(false);
-            return totalDuration;
-          }
-          return next;
-        });
-      }
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const delta = lastTimestampRef.current === null ? 0 : (now - lastTimestampRef.current) / 1000;
       lastTimestampRef.current = now;
-      animFrameRef.current = requestAnimationFrame(step);
-    };
+      setCurrentTime((previousTime) => {
+        const segment = allSegments.find(
+          (item) => previousTime >= item.globalStart && previousTime < item.globalEnd
+        );
+        const narration = ttsAudioRef.current;
+        const audioClockTime =
+          voice && !isMuted && segment && narration && !narration.paused && narration.readyState >= 2
+            ? segment.globalStart + narration.currentTime
+            : previousTime + delta;
+        if (audioClockTime >= totalDuration) {
+          setIsPlaying(false);
+          return totalDuration;
+        }
+        return audioClockTime;
+      });
+    }, 30);
 
-    animFrameRef.current = requestAnimationFrame(step);
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
-  }, [isPlaying, totalDuration]);
+    return () => window.clearInterval(timer);
+  }, [allSegments, isMuted, isPlaying, totalDuration, voice]);
 
   // Edge-TTS audio playback & synchronization
   useEffect(() => {
@@ -187,16 +192,20 @@ export const VideofyPlayer: React.FC<Props> = ({
         const rawText = currentSegment.text || (currentSegment.texts && currentSegment.texts[0]?.displayText) || "";
         const [, spokenText] = parsePronunciationText(rawText);
         if (spokenText.trim()) {
-          fetchEdgeTts(spokenText, "fr-FR-DeniseNeural").then((data) => {
-            if (data.audioBase64 && ttsAudioRef.current) {
-              setTtsMap((prev) => ({ ...prev, [segKey]: data }));
-              setCurrentSpeech(data);
-              ttsAudioRef.current.src = data.audioBase64;
-              const relTime = Math.max(0, currentTime - currentSegment.globalStart);
-              ttsAudioRef.current.currentTime = relTime;
-              ttsAudioRef.current.play().catch(() => {});
-            }
-          });
+          fetchEdgeTts(spokenText, "fr-FR-DeniseNeural")
+            .then((data) => {
+              if (data.audioBase64 && ttsAudioRef.current) {
+                setTtsMap((prev) => ({ ...prev, [segKey]: data }));
+                setCurrentSpeech(data);
+                ttsAudioRef.current.src = data.audioBase64;
+                const relTime = Math.max(0, currentTime - currentSegment.globalStart);
+                ttsAudioRef.current.currentTime = relTime;
+                ttsAudioRef.current.play().catch(() => {});
+              }
+            })
+            .catch((err) => {
+              console.warn(`[VideofyPlayer] On-demand TTS failed for segment ${segKey}:`, err);
+            });
         }
       }
     } else {
@@ -207,19 +216,63 @@ export const VideofyPlayer: React.FC<Props> = ({
     }
   }, [isPlaying, isMuted, voice, currentSegment, ttsMap]);
 
+  useEffect(() => {
+    const musicElement = bgMusicRef.current;
+    if (!musicElement) return;
+
+    try {
+      let audioContext = musicAudioContextRef.current;
+      let source = musicSourceNodeRef.current;
+      let gain = musicGainNodeRef.current;
+      if (!audioContext || !source || !gain) {
+        const AudioContextClass =
+          window.AudioContext ||
+          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        audioContext = new AudioContextClass();
+        source = audioContext.createMediaElementSource(musicElement);
+        gain = audioContext.createGain();
+        musicAudioContextRef.current = audioContext;
+        musicSourceNodeRef.current = source;
+        musicGainNodeRef.current = gain;
+      }
+      source.connect(gain);
+      gain.connect(audioContext.destination);
+      musicElement.volume = 1;
+    } catch (err) {
+      console.warn("[VideofyPlayer] Music gain setup failed:", err);
+    }
+
+    return () => {
+      musicSourceNodeRef.current?.disconnect();
+      musicGainNodeRef.current?.disconnect();
+    };
+  }, [playerConfig?.backgroundMusic]);
+
   // Sync background music with audio ducking when TTS is talking
   useEffect(() => {
     if (!bgMusicRef.current) return;
     if (isPlaying && backgroundMusic && !isMuted) {
-      // Duck music volume when voiceover is actively enabled
-      const isVoiceActive = voice && currentSpeech?.audioBase64;
-      const baseVol = playerConfig?.backgroundMusicVolume ?? 0.35;
-      bgMusicRef.current.volume = isVoiceActive ? baseVol * 0.25 : baseVol * 0.75;
+      const audioContext = musicAudioContextRef.current;
+      const gain = musicGainNodeRef.current?.gain;
+      if (audioContext && gain) {
+        void audioContext.resume();
+        const baseVol = playerConfig?.backgroundMusicVolume ?? 0.35;
+        const ducking = motionConfig.ducking;
+        const speaking = voice && isVoiceSpeaking;
+        const targetVolume = Math.max(baseVol * (speaking ? ducking.duckLevel : ducking.restoreLevel), 0.0001);
+        const now = audioContext.currentTime;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(gain.value, 0.0001), now);
+        gain.exponentialRampToValueAtTime(
+          targetVolume,
+          now + (speaking ? ducking.rampDownSeconds : ducking.rampUpSeconds)
+        );
+      }
       bgMusicRef.current.play().catch(() => {});
     } else {
       bgMusicRef.current.pause();
     }
-  }, [isPlaying, backgroundMusic, isMuted, voice, currentSpeech, playerConfig?.backgroundMusicVolume]);
+  }, [isPlaying, backgroundMusic, isMuted, voice, isVoiceSpeaking, playerConfig?.backgroundMusicVolume]);
 
   const togglePlay = () => {
     if (currentTime >= totalDuration && totalDuration > 0) {
@@ -416,8 +469,18 @@ export const VideofyPlayer: React.FC<Props> = ({
         ref={ttsAudioRef}
         preload="auto"
         className="hidden"
+        onPlay={() => setIsVoiceSpeaking(true)}
+        onPause={() => setIsVoiceSpeaking(false)}
         onEnded={() => {
-          // Finished playing segment audio
+          setIsVoiceSpeaking(false);
+        }}
+        onTimeUpdate={() => {
+          const audio = ttsAudioRef.current;
+          if (!audio || !voice || isMuted || audio.paused) return;
+          const segment = allSegments.find(
+            (item) => currentTime >= item.globalStart && currentTime < item.globalEnd
+          );
+          if (segment) setCurrentTime(segment.globalStart + audio.currentTime);
         }}
       />
 

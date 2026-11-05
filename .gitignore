@@ -27,3 +27,12 @@ coverage/
 projects/*
 !projects/.project-structure/
 !projects/.project-structure/**
+
+# Exclusions ajoutées
+_backups/
+.output/
+.site-import/
+example_video_e24.mp4
+.git_broken/
+.git_corrupted/
+.git_old/
